@@ -90,6 +90,18 @@ fn document_save_as(state: State<'_, SharedState>, document_id: String, content:
 }
 
 #[tauri::command]
+async fn document_tag_update(state: State<'_, SharedState>, document_id: String, tags: Vec<String>) -> Result<DocumentSummary, AppError> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || state.db.update_tags(&document_id, &tags)).await.map_err(|e| AppError::Message(e.to_string()))?
+}
+
+#[tauri::command]
+async fn document_tidy(state: State<'_, SharedState>, document_id: String) -> Result<DocumentContent, AppError> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || documents::tidy(&state, &document_id)).await.map_err(|e| AppError::Message(e.to_string()))?
+}
+
+#[tauri::command]
 fn document_create(state: State<'_, SharedState>, input: FileCreateInput) -> Result<AppSnapshot, AppError> {
     library::create_entry(&state, input)?;
     state.db.snapshot()
@@ -210,10 +222,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             bootstrap, app_snapshot, library_add, library_remove, library_refresh,
-            document_read, document_write, document_force_write, document_save_as, document_create,
+            document_read, document_write, document_force_write, document_save_as, document_tidy, document_create,
             document_rename, document_move, document_trash, document_update_meta,
             chapter_create, chapter_update, chapter_delete,
             annotation_save, annotation_delete, material_save,
+            document_tag_update,
             group_create, group_toggle_document, search, reading_progress_save,
             settings_save, session_save, history_list, history_restore
         ])

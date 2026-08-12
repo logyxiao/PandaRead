@@ -47,12 +47,12 @@ pub struct DocumentSummary {
     pub id: String, pub library_id: String, pub relative_path: String, pub title: String,
     pub format: String, pub word_count: i64, pub modified_at: i64, pub gender: String,
     pub genre: String, pub subgenre: String, pub length_kind: String, pub purpose: String,
-    pub progress: String, pub favorite: bool, pub missing: bool,
+    pub progress: String, pub favorite: bool, pub missing: bool, pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TreeNode { pub name: String, pub relative_path: String, pub kind: String, pub library_id: String, pub document_id: Option<String>, pub children: Vec<TreeNode> }
+pub struct TreeNode { pub name: String, pub relative_path: String, pub kind: String, pub library_id: String, pub document_id: Option<String>, pub count: i64, pub children: Vec<TreeNode> }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -1,7 +1,7 @@
 use crate::models::*;
 use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
-use std::{collections::HashSet, path::{Path, PathBuf}, sync::Arc};
+use std::{collections::{HashMap,HashSet}, fs, path::{Path,PathBuf}, sync::Arc};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -38,6 +38,10 @@ impl Database {
           CREATE TABLE IF NOT EXISTS reading_progress(
             document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
             chapter_id TEXT, char_offset INTEGER NOT NULL, scroll_ratio REAL NOT NULL, updated_at INTEGER NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS document_tags(
+            document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+            tag TEXT NOT NULL, PRIMARY KEY(document_id, tag)
           );
           CREATE TABLE IF NOT EXISTS annotations(
             id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
@@ -110,7 +114,7 @@ impl Database {
     pub fn remove_library(&self, id: &str) -> Result<(), AppError> {
         // Cascade-delete everything that belongs to this library; files on disk are untouched.
         let conn=self.conn.lock();let tx=conn.unchecked_transaction()?;
-        for table in ["chapters","annotations","reading_progress","history","group_documents","materials"]{
+        for table in ["chapters","annotations","reading_progress","history","group_documents","materials","document_tags"]{
             tx.execute(&format!("DELETE FROM {} WHERE document_id IN (SELECT id FROM documents WHERE library_id=?1)",table),[id])?;
         }
         tx.execute("DELETE FROM documents WHERE library_id=?1",[id])?;
@@ -161,16 +165,24 @@ impl Database {
     }
 
     pub fn documents(&self) -> Result<Vec<DocumentSummary>,AppError> {
-        let conn=self.conn.lock(); let mut stmt=conn.prepare("SELECT id,library_id,relative_path,title,format,word_count,modified_at,gender,genre,subgenre,length_kind,purpose,progress,favorite,missing FROM documents ORDER BY relative_path COLLATE NOCASE")?;
+        let conn=self.conn.lock(); let mut stmt=conn.prepare("SELECT id,library_id,relative_path,title,format,word_count,modified_at,gender,genre,subgenre,length_kind,purpose,progress,favorite,missing,(SELECT COALESCE(json_group_array(tag),'[]') FROM document_tags WHERE document_id=documents.id) FROM documents ORDER BY relative_path COLLATE NOCASE")?;
         let rows = stmt.query_map([], row_document)?.collect::<Result<_,_>>()?;
         Ok(rows)
     }
 
+    pub fn update_tags(&self, document_id:&str, tags:&[String])->Result<DocumentSummary,AppError>{
+        let conn=self.conn.lock();let tx=conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM document_tags WHERE document_id=?1",[document_id])?;
+        for t in tags{let t=t.trim();if !t.is_empty(){tx.execute("INSERT INTO document_tags(document_id,tag) VALUES(?1,?2)",params![document_id,t])?;}}
+        tx.commit()?;
+        Ok(self.stored_document(document_id)?.summary)
+    }
+
     pub fn stored_document(&self,id:&str)->Result<StoredDocument,AppError>{
         let conn=self.conn.lock();
-        conn.query_row(r#"SELECT d.id,d.library_id,d.relative_path,d.title,d.format,d.word_count,d.modified_at,d.gender,d.genre,d.subgenre,d.length_kind,d.purpose,d.progress,d.favorite,d.missing,l.root_path,d.content_hash,d.encoding,d.newline
+        conn.query_row(r#"SELECT d.id,d.library_id,d.relative_path,d.title,d.format,d.word_count,d.modified_at,d.gender,d.genre,d.subgenre,d.length_kind,d.purpose,d.progress,d.favorite,d.missing,l.root_path,d.content_hash,d.encoding,d.newline,(SELECT COALESCE(json_group_array(tag),'[]') FROM document_tags WHERE document_id=d.id)
           FROM documents d JOIN libraries l ON l.id=d.library_id WHERE d.id=?1"#, [id], |r| Ok(StoredDocument{
-            summary: DocumentSummary{id:r.get(0)?,library_id:r.get(1)?,relative_path:r.get(2)?,title:r.get(3)?,format:r.get(4)?,word_count:r.get(5)?,modified_at:r.get(6)?,gender:r.get(7)?,genre:r.get(8)?,subgenre:r.get(9)?,length_kind:r.get(10)?,purpose:r.get(11)?,progress:r.get(12)?,favorite:r.get::<_,i64>(13)?!=0,missing:r.get::<_,i64>(14)?!=0},
+            summary: DocumentSummary{id:r.get(0)?,library_id:r.get(1)?,relative_path:r.get(2)?,title:r.get(3)?,format:r.get(4)?,word_count:r.get(5)?,modified_at:r.get(6)?,gender:r.get(7)?,genre:r.get(8)?,subgenre:r.get(9)?,length_kind:r.get(10)?,purpose:r.get(11)?,progress:r.get(12)?,favorite:r.get::<_,i64>(13)?!=0,missing:r.get::<_,i64>(14)?!=0,tags:serde_json::from_str(&r.get::<_,String>(19)?).unwrap_or_default()},
             root_path:PathBuf::from(r.get::<_,String>(15)?),content_hash:r.get(16)?,newline:r.get(18)?
         })).optional()?.ok_or(AppError::NotFound)
     }
@@ -210,7 +222,7 @@ impl Database {
 
     pub fn search(&self,q:SearchQuery)->Result<Vec<SearchResult>,AppError>{
         let docs=self.documents()?;let needle=q.text.trim().to_lowercase();
-        let matched:HashSet<String>=if needle.is_empty(){HashSet::new()}else{docs.iter().filter(|d|d.title.to_lowercase().contains(&needle)||d.relative_path.to_lowercase().contains(&needle)).map(|d|d.id.clone()).collect()};
+        let matched:HashSet<String>=if needle.is_empty(){HashSet::new()}else{docs.iter().filter(|d|d.title.to_lowercase().contains(&needle)||d.relative_path.to_lowercase().contains(&needle)||d.tags.iter().any(|t|t.to_lowercase().contains(&needle))).map(|d|d.id.clone()).collect()};
         Ok(docs.into_iter().filter(|d|!d.missing&&(needle.is_empty()||matched.contains(&d.id))&&q.library_id.as_ref().map_or(true,|v|&d.library_id==v)&&q.length_kind.as_ref().map_or(true,|v|&d.length_kind==v)&&q.purpose.as_ref().map_or(true,|v|&d.purpose==v)&&q.progress.as_ref().map_or(true,|v|&d.progress==v)&&q.format.as_ref().map_or(true,|v|&d.format==v)).map(|d|SearchResult{snippet:d.relative_path.clone(),document:d}).collect())
     }
 
@@ -219,11 +231,51 @@ impl Database {
     pub fn history_path(&self,id:&str,doc:&str)->Result<PathBuf,AppError>{self.conn.lock().query_row("SELECT file_path FROM history WHERE id=?1 AND document_id=?2",params![id,doc],|r|r.get::<_,String>(0)).optional()?.map(PathBuf::from).ok_or(AppError::NotFound)}
     pub fn prune_history(&self,doc:&str)->Result<Vec<PathBuf>,AppError>{let cutoff=now()-30*86400;let conn=self.conn.lock();let mut s=conn.prepare("SELECT id,file_path FROM history WHERE document_id=?1 AND (created_at<?2 OR id NOT IN(SELECT id FROM history WHERE document_id=?1 ORDER BY created_at DESC LIMIT 20))")?;let old=s.query_map(params![doc,cutoff],|r|Ok((r.get::<_,String>(0)?,PathBuf::from(r.get::<_,String>(1)?))))?.collect::<Result<Vec<_>,_>>()?;for(id,_)in&old{conn.execute("DELETE FROM history WHERE id=?1",[id])?;}Ok(old.into_iter().map(|x|x.1).collect())}
 
-    fn tree(&self)->Result<Vec<TreeNode>,AppError>{let docs=self.documents()?;let libs=self.libraries()?;let mut roots=Vec::new();for lib in libs{let mut root=TreeNode{name:lib.name,relative_path:"".into(),kind:"library".into(),library_id:lib.id.clone(),document_id:None,children:Vec::new()};for d in docs.iter().filter(|d|d.library_id==lib.id&&!d.missing){insert_path(&mut root,&d.relative_path,&d.id);}roots.push(root);}Ok(roots)}
+    fn tree(&self)->Result<Vec<TreeNode>,AppError>{
+        let docs=self.documents()?;
+        let doc_by_key:HashMap<(String,String),String>=docs.iter().map(|d|((d.library_id.clone(),d.relative_path.clone()),d.id.clone())).collect();
+        let libs=self.library_paths()?;
+        let mut roots=Vec::new();
+        for(lib_id,root_path,lib_name)in libs{
+            let mut root=TreeNode{name:lib_name,relative_path:String::new(),kind:"library".into(),library_id:lib_id.clone(),document_id:None,count:0,children:Vec::new()};
+            build_tree(&mut root,&root_path,&root_path,&lib_id,&doc_by_key);
+            roots.push(root);
+        }
+        Ok(roots)
+    }
 }
 
-fn row_document(r:&rusqlite::Row<'_>)->rusqlite::Result<DocumentSummary>{Ok(DocumentSummary{id:r.get(0)?,library_id:r.get(1)?,relative_path:r.get(2)?,title:r.get(3)?,format:r.get(4)?,word_count:r.get(5)?,modified_at:r.get(6)?,gender:r.get(7)?,genre:r.get(8)?,subgenre:r.get(9)?,length_kind:r.get(10)?,purpose:r.get(11)?,progress:r.get(12)?,favorite:r.get::<_,i64>(13)?!=0,missing:r.get::<_,i64>(14)?!=0})}
-fn insert_path(root:&mut TreeNode,path:&str,id:&str){let parts:Vec<&str>=path.split('/').collect();let library_id=root.library_id.clone();let mut node=root;for(i,p)in parts.iter().enumerate(){let leaf=i==parts.len()-1;if let Some(pos)=node.children.iter().position(|n|n.name==*p){node=&mut node.children[pos];}else{node.children.push(TreeNode{name:(*p).into(),relative_path:parts[..=i].join("/"),kind:if leaf{"document"}else{"folder"}.into(),library_id:library_id.clone(),document_id:if leaf{Some(id.into())}else{None},children:Vec::new()});let len=node.children.len();node=&mut node.children[len-1];}}}
+fn row_document(r:&rusqlite::Row<'_>)->rusqlite::Result<DocumentSummary>{Ok(DocumentSummary{id:r.get(0)?,library_id:r.get(1)?,relative_path:r.get(2)?,title:r.get(3)?,format:r.get(4)?,word_count:r.get(5)?,modified_at:r.get(6)?,gender:r.get(7)?,genre:r.get(8)?,subgenre:r.get(9)?,length_kind:r.get(10)?,purpose:r.get(11)?,progress:r.get(12)?,favorite:r.get::<_,i64>(13)?!=0,missing:r.get::<_,i64>(14)?!=0,tags:serde_json::from_str(&r.get::<_,String>(15)?).unwrap_or_default()})}
+fn build_tree(node:&mut TreeNode,root:&Path,dir:&Path,library_id:&str,doc_by_key:&HashMap<(String,String),String>){
+    let Ok(entries)=fs::read_dir(dir)else{return;};
+    let mut entries:Vec<_>=entries.flatten().collect();
+    // 文件夹排最上，再按名称排序
+    entries.sort_by(|a,b|{
+        let ak=a.file_type().map(|t|t.is_dir()).unwrap_or(false);
+        let bk=b.file_type().map(|t|t.is_dir()).unwrap_or(false);
+        bk.cmp(&ak).then_with(||a.file_name().to_string_lossy().to_lowercase().cmp(&b.file_name().to_string_lossy().to_lowercase()))
+    });
+    for entry in entries{
+        let path=entry.path();
+        let name=entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.')||name=="__MACOSX"||name=="node_modules"{continue;}
+        let ft=match entry.file_type(){Ok(t)=>t,Err(_)=>continue};
+        let relative=path.strip_prefix(root).map(|p|p.to_string_lossy().replace('\\',"/")).unwrap_or_default();
+        if ft.is_dir(){
+            let mut child=TreeNode{name,relative_path:relative,kind:"folder".into(),library_id:library_id.into(),document_id:None,count:0,children:Vec::new()};
+            build_tree(&mut child,root,&path,library_id,doc_by_key);
+            node.children.push(child);
+        }else if ft.is_file(){
+            let ext=path.extension().and_then(|s|s.to_str()).unwrap_or("").to_lowercase();
+            if ext!="txt"&&ext!="epub"{continue;}
+            let id=doc_by_key.get(&(library_id.to_string(),relative.clone())).cloned();
+            node.children.push(TreeNode{name,relative_path:relative,kind:"document".into(),library_id:library_id.into(),document_id:id,count:0,children:Vec::new()});
+        }
+    }
+    let direct=node.children.iter().filter(|c|c.kind=="document").count();
+    let sub:usize=node.children.iter().filter(|c|c.kind=="folder").map(|c|c.count as usize).sum();
+    node.count=(direct+sub)as i64;
+}
 fn now()->i64{chrono::Utc::now().timestamp()}
 
 #[cfg(test)]
@@ -281,5 +333,60 @@ mod tests {
         assert!(db.history(&id).unwrap().is_empty());
         assert!(db.progress(&id).unwrap().is_none());
         assert!(db.libraries().unwrap().is_empty());
+    }
+
+    #[test]
+    fn tree_includes_empty_folders_and_counts(){
+        let db=Database::open(":memory:".into()).unwrap();
+        let tmp=std::env::temp_dir().join(format!("novalyte-tree-test-{}",Uuid::new_v4()));
+        fs::create_dir_all(tmp.join("a/empty")).unwrap();
+        fs::create_dir_all(tmp.join("b")).unwrap();
+        fs::write(tmp.join("a/x.txt"),"hi").unwrap();
+        fs::write(tmp.join("b/y.txt"),"hi").unwrap();
+        fs::write(tmp.join("b/ignore.txt"),"hi").unwrap();
+        fs::write(tmp.join("b/.h.txt"),"hi").unwrap();
+        let root=tmp.canonicalize().unwrap();
+        db.conn.lock().execute("INSERT INTO libraries(id,root_path,name,created_at) VALUES('l1',?1,'t',1)",[root.to_string_lossy().to_string()]).unwrap();
+        db.upsert_documents(&[entry("a/x.txt",1),entry("b/y.txt",1)]).unwrap();
+        let tree=db.tree().unwrap();
+        let lib=&tree[0];
+        assert_eq!(lib.count,3);
+        let a=lib.children.iter().find(|c|c.name=="a").unwrap();
+        assert_eq!(a.count,1);
+        assert!(a.children.iter().find(|c|c.name=="x.txt").unwrap().document_id.is_some());
+        let empty=a.children.iter().find(|c|c.name=="empty").unwrap();
+        assert_eq!(empty.kind,"folder");
+        assert_eq!(empty.count,0);
+        assert!(empty.children.is_empty());
+        // 文件夹排在文件前面
+        assert_eq!(a.children[0].name,"empty");
+        assert_eq!(a.children[0].kind,"folder");
+        let b=lib.children.iter().find(|c|c.name=="b").unwrap();
+        assert_eq!(b.count,2);
+        // 隐藏文件被跳过（ignore.txt 是合法 txt，应计入）
+        assert!(b.children.iter().all(|c|c.name!=".h.txt"));
+        let _=fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn tags_roundtrip_and_search(){
+        let db=Database::open(":memory:".into()).unwrap();
+        db.conn.lock().execute("INSERT INTO libraries(id,root_path,name,created_at) VALUES('l1','/tmp/x','t',1)",[]).unwrap();
+        db.upsert_documents(&[entry("a.txt",1)]).unwrap();
+        let id=db.documents().unwrap()[0].id.clone();
+        // 初始无标签
+        assert!(db.stored_document(&id).unwrap().summary.tags.is_empty());
+        // 保存标签
+        let s=db.update_tags(&id,&["爽文".into(),"重生".into()]).unwrap();
+        assert_eq!(s.tags,vec!["爽文","重生"]);
+        // documents() 也带标签
+        assert_eq!(db.documents().unwrap()[0].tags.len(),2);
+        // 标签搜索命中
+        let hits=db.search(SearchQuery{text:"重生".into(),library_id:None,length_kind:None,purpose:None,progress:None,format:None}).unwrap();
+        assert_eq!(hits.len(),1);
+        assert_eq!(hits[0].document.id,id);
+        // 覆盖保存（去重 + 清空）
+        let s2=db.update_tags(&id,&["爽文".into(),"爽文".into()]).unwrap();
+        assert_eq!(s2.tags,vec!["爽文"]);
     }
 }

@@ -4,8 +4,8 @@ export type Progress = "构思中" | "大纲筹备" | "撰写中" | "连载中" 
 export type Theme = "day" | "protect" | "night" | "parchment";
 
 export interface LibraryRoot { id:string; name:string; documentCount:number }
-export interface DocumentSummary { id:string; libraryId:string; relativePath:string; title:string; format:Format; wordCount:number; modifiedAt:number; gender:string; genre:string; subgenre:string; lengthKind:string; purpose:Purpose; progress:Progress; favorite:boolean; missing:boolean }
-export interface TreeNode { name:string; relativePath:string; kind:"library"|"folder"|"document"; libraryId:string; documentId?:string; children:TreeNode[] }
+export interface DocumentSummary { id:string; libraryId:string; relativePath:string; title:string; format:Format; wordCount:number; modifiedAt:number; gender:string; genre:string; subgenre:string; lengthKind:string; purpose:Purpose; progress:Progress; favorite:boolean; missing:boolean; tags:string[] }
+export interface TreeNode { name:string; relativePath:string; kind:"library"|"folder"|"document"; libraryId:string; documentId?:string; count:number; children:TreeNode[] }
 export interface ChapterNode { id:string; documentId:string; title:string; offset:number; kind:"auto"|"manual"; level:number }
 export interface Annotation { id:string; documentId:string; startOffset:number; endOffset:number; quote:string; prefix:string; suffix:string; note:string; marker:string; orphaned:boolean; createdAt:number }
 export interface MaterialClip { id:string; documentId:string; quote:string; note:string; groupName:string; sourceTitle:string; startOffset:number; createdAt:number }
