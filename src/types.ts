@@ -16,7 +16,7 @@ export interface UserSettings { reader:ReaderSettings; shortcuts:Record<string,s
 export interface AppSession { leftDocumentId?:string; rightDocumentId?:string; split:boolean; splitRatio:number; sidebarOpen:boolean; detailOpen:boolean; activeLibraryId?:string }
 export interface AppSnapshot { libraries:LibraryRoot[]; documents:DocumentSummary[]; tree:TreeNode[]; groups:VirtualGroup[]; materials:MaterialClip[]; settings:UserSettings; session:AppSession }
 export interface DocumentContent { summary:DocumentSummary; content:string; contentHash:string; encoding:string; newline:string; editable:boolean; chapters:ChapterNode[]; annotations:Annotation[]; readingProgress?:ReadingProgress }
-export interface SearchQuery { text:string; libraryId?:string; lengthKind?:string; purpose?:Purpose; progress?:Progress; format?:Format }
+export interface SearchQuery { text:string; tag?:string; libraryId?:string; lengthKind?:string; purpose?:Purpose; progress?:Progress; format?:Format }
 export interface SearchResult { document:DocumentSummary; snippet:string }
 
 declare global { interface Window { __TAURI_INTERNALS__?: unknown } }

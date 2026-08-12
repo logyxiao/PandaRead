@@ -125,7 +125,7 @@ pub struct AnnotationInput { pub id: Option<String>, pub document_id: String, pu
 pub struct MaterialInput { pub document_id: String, pub quote: String, pub note: String, pub group_name: String, pub source_title: String, pub start_offset: i64 }
 
 #[derive(Debug, Deserialize)] #[serde(rename_all = "camelCase")]
-pub struct SearchQuery { pub text: String, pub library_id: Option<String>, pub length_kind: Option<String>, pub purpose: Option<String>, pub progress: Option<String>, pub format: Option<String> }
+pub struct SearchQuery { pub text: String, pub tag: Option<String>, pub library_id: Option<String>, pub length_kind: Option<String>, pub purpose: Option<String>, pub progress: Option<String>, pub format: Option<String> }
 #[derive(Debug, Serialize)] #[serde(rename_all = "camelCase")]
 pub struct SearchResult { pub document: DocumentSummary, pub snippet: String }
 

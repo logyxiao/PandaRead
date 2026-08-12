@@ -173,8 +173,14 @@ impl Database {
     pub fn update_tags(&self, document_id:&str, tags:&[String])->Result<DocumentSummary,AppError>{
         let conn=self.conn.lock();let tx=conn.unchecked_transaction()?;
         tx.execute("DELETE FROM document_tags WHERE document_id=?1",[document_id])?;
-        for t in tags{let t=t.trim();if !t.is_empty(){tx.execute("INSERT INTO document_tags(document_id,tag) VALUES(?1,?2)",params![document_id,t])?;}}
+        let mut seen=HashSet::new();
+        for tag in tags{
+            let tag=tag.trim().trim_start_matches('#').trim();
+            let key=tag.to_lowercase();
+            if !tag.is_empty()&&seen.insert(key){tx.execute("INSERT INTO document_tags(document_id,tag) VALUES(?1,?2)",params![document_id,tag])?;}
+        }
         tx.commit()?;
+        drop(conn);
         Ok(self.stored_document(document_id)?.summary)
     }
 
@@ -222,8 +228,9 @@ impl Database {
 
     pub fn search(&self,q:SearchQuery)->Result<Vec<SearchResult>,AppError>{
         let docs=self.documents()?;let needle=q.text.trim().to_lowercase();
+        let tag=q.tag.as_deref().map(str::trim).filter(|value|!value.is_empty()).map(str::to_lowercase);
         let matched:HashSet<String>=if needle.is_empty(){HashSet::new()}else{docs.iter().filter(|d|d.title.to_lowercase().contains(&needle)||d.relative_path.to_lowercase().contains(&needle)||d.tags.iter().any(|t|t.to_lowercase().contains(&needle))).map(|d|d.id.clone()).collect()};
-        Ok(docs.into_iter().filter(|d|!d.missing&&(needle.is_empty()||matched.contains(&d.id))&&q.library_id.as_ref().map_or(true,|v|&d.library_id==v)&&q.length_kind.as_ref().map_or(true,|v|&d.length_kind==v)&&q.purpose.as_ref().map_or(true,|v|&d.purpose==v)&&q.progress.as_ref().map_or(true,|v|&d.progress==v)&&q.format.as_ref().map_or(true,|v|&d.format==v)).map(|d|SearchResult{snippet:d.relative_path.clone(),document:d}).collect())
+        Ok(docs.into_iter().filter(|d|!d.missing&&(needle.is_empty()||matched.contains(&d.id))&&tag.as_ref().map_or(true,|value|d.tags.iter().any(|item|item.to_lowercase()==*value))&&q.library_id.as_ref().map_or(true,|v|&d.library_id==v)&&q.length_kind.as_ref().map_or(true,|v|&d.length_kind==v)&&q.purpose.as_ref().map_or(true,|v|&d.purpose==v)&&q.progress.as_ref().map_or(true,|v|&d.progress==v)&&q.format.as_ref().map_or(true,|v|&d.format==v)).map(|d|SearchResult{snippet:d.relative_path.clone(),document:d}).collect())
     }
 
     pub fn add_history(&self,id:&str,doc:&str,path:&Path,words:i64,preview:&str)->Result<(),AppError>{self.conn.lock().execute("INSERT INTO history(id,document_id,file_path,created_at,word_count,preview) VALUES(?1,?2,?3,?4,?5,?6)",params![id,doc,path.to_string_lossy(),now(),words,preview])?;Ok(())}
@@ -382,7 +389,7 @@ mod tests {
         // documents() 也带标签
         assert_eq!(db.documents().unwrap()[0].tags.len(),2);
         // 标签搜索命中
-        let hits=db.search(SearchQuery{text:"重生".into(),library_id:None,length_kind:None,purpose:None,progress:None,format:None}).unwrap();
+        let hits=db.search(SearchQuery{text:String::new(),tag:Some("重生".into()),library_id:None,length_kind:None,purpose:None,progress:None,format:None}).unwrap();
         assert_eq!(hits.len(),1);
         assert_eq!(hits[0].document.id,id);
         // 覆盖保存（去重 + 清空）
