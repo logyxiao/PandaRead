@@ -165,7 +165,7 @@ impl Database {
     }
 
     pub fn documents(&self) -> Result<Vec<DocumentSummary>,AppError> {
-        let conn=self.conn.lock(); let mut stmt=conn.prepare("SELECT id,library_id,relative_path,title,format,word_count,modified_at,gender,genre,subgenre,length_kind,purpose,progress,favorite,missing,(SELECT COALESCE(json_group_array(tag),'[]') FROM document_tags WHERE document_id=documents.id) FROM documents ORDER BY relative_path COLLATE NOCASE")?;
+        let conn=self.conn.lock(); let mut stmt=conn.prepare("SELECT id,library_id,relative_path,title,format,word_count,modified_at,gender,genre,subgenre,length_kind,purpose,progress,favorite,missing,(SELECT COALESCE(json_group_array(tag),'[]') FROM document_tags WHERE document_id=documents.id),COALESCE((SELECT char_offset FROM reading_progress WHERE document_id=documents.id),0) FROM documents ORDER BY relative_path COLLATE NOCASE")?;
         let rows = stmt.query_map([], row_document)?.collect::<Result<_,_>>()?;
         Ok(rows)
     }
@@ -186,9 +186,9 @@ impl Database {
 
     pub fn stored_document(&self,id:&str)->Result<StoredDocument,AppError>{
         let conn=self.conn.lock();
-        conn.query_row(r#"SELECT d.id,d.library_id,d.relative_path,d.title,d.format,d.word_count,d.modified_at,d.gender,d.genre,d.subgenre,d.length_kind,d.purpose,d.progress,d.favorite,d.missing,l.root_path,d.content_hash,d.encoding,d.newline,(SELECT COALESCE(json_group_array(tag),'[]') FROM document_tags WHERE document_id=d.id)
+        conn.query_row(r#"SELECT d.id,d.library_id,d.relative_path,d.title,d.format,d.word_count,d.modified_at,d.gender,d.genre,d.subgenre,d.length_kind,d.purpose,d.progress,d.favorite,d.missing,l.root_path,d.content_hash,d.encoding,d.newline,(SELECT COALESCE(json_group_array(tag),'[]') FROM document_tags WHERE document_id=d.id),COALESCE((SELECT char_offset FROM reading_progress WHERE document_id=d.id),0)
           FROM documents d JOIN libraries l ON l.id=d.library_id WHERE d.id=?1"#, [id], |r| Ok(StoredDocument{
-            summary: DocumentSummary{id:r.get(0)?,library_id:r.get(1)?,relative_path:r.get(2)?,title:r.get(3)?,format:r.get(4)?,word_count:r.get(5)?,modified_at:r.get(6)?,gender:r.get(7)?,genre:r.get(8)?,subgenre:r.get(9)?,length_kind:r.get(10)?,purpose:r.get(11)?,progress:r.get(12)?,favorite:r.get::<_,i64>(13)?!=0,missing:r.get::<_,i64>(14)?!=0,tags:serde_json::from_str(&r.get::<_,String>(19)?).unwrap_or_default()},
+            summary: DocumentSummary{id:r.get(0)?,library_id:r.get(1)?,relative_path:r.get(2)?,title:r.get(3)?,format:r.get(4)?,word_count:r.get(5)?,modified_at:r.get(6)?,gender:r.get(7)?,genre:r.get(8)?,subgenre:r.get(9)?,length_kind:r.get(10)?,purpose:r.get(11)?,progress:r.get(12)?,favorite:r.get::<_,i64>(13)?!=0,missing:r.get::<_,i64>(14)?!=0,tags:serde_json::from_str(&r.get::<_,String>(19)?).unwrap_or_default(),read_offset:r.get(20)?},
             root_path:PathBuf::from(r.get::<_,String>(15)?),content_hash:r.get(16)?,newline:r.get(18)?
         })).optional()?.ok_or(AppError::NotFound)
     }
@@ -252,7 +252,7 @@ impl Database {
     }
 }
 
-fn row_document(r:&rusqlite::Row<'_>)->rusqlite::Result<DocumentSummary>{Ok(DocumentSummary{id:r.get(0)?,library_id:r.get(1)?,relative_path:r.get(2)?,title:r.get(3)?,format:r.get(4)?,word_count:r.get(5)?,modified_at:r.get(6)?,gender:r.get(7)?,genre:r.get(8)?,subgenre:r.get(9)?,length_kind:r.get(10)?,purpose:r.get(11)?,progress:r.get(12)?,favorite:r.get::<_,i64>(13)?!=0,missing:r.get::<_,i64>(14)?!=0,tags:serde_json::from_str(&r.get::<_,String>(15)?).unwrap_or_default()})}
+fn row_document(r:&rusqlite::Row<'_>)->rusqlite::Result<DocumentSummary>{Ok(DocumentSummary{id:r.get(0)?,library_id:r.get(1)?,relative_path:r.get(2)?,title:r.get(3)?,format:r.get(4)?,word_count:r.get(5)?,modified_at:r.get(6)?,gender:r.get(7)?,genre:r.get(8)?,subgenre:r.get(9)?,length_kind:r.get(10)?,purpose:r.get(11)?,progress:r.get(12)?,favorite:r.get::<_,i64>(13)?!=0,missing:r.get::<_,i64>(14)?!=0,tags:serde_json::from_str(&r.get::<_,String>(15)?).unwrap_or_default(),read_offset:r.get(16)?})}
 fn build_tree(node:&mut TreeNode,root:&Path,dir:&Path,library_id:&str,doc_by_key:&HashMap<(String,String),String>){
     let Ok(entries)=fs::read_dir(dir)else{return;};
     let mut entries:Vec<_>=entries.flatten().collect();

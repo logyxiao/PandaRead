@@ -29,7 +29,7 @@ pub fn read(state:&Arc<AppState>,id:&str)->Result<DocumentContent,AppError>{
     let mut summary=stored.summary;
     if summary.word_count==0{summary.word_count=words;}
     if summary.length_kind=="auto"{summary.length_kind=if words>=80_000{"长篇"}else{"短篇"}.into();}
-    Ok(DocumentContent{summary,content,content_hash:current_hash,encoding,newline,editable:path.extension().and_then(|s|s.to_str()).map_or(false,|x|x.eq_ignore_ascii_case("txt")),chapters:state.db.chapters(id)?,annotations:state.db.annotations(id)?,reading_progress:state.db.progress(id)?})
+    Ok(DocumentContent{summary,absolute_path:path.to_string_lossy().into_owned(),content,content_hash:current_hash,encoding,newline,editable:path.extension().and_then(|s|s.to_str()).map_or(false,|x|x.eq_ignore_ascii_case("txt")),chapters:state.db.chapters(id)?,annotations:state.db.annotations(id)?,reading_progress:state.db.progress(id)?})
 }
 
 pub fn write(state:&Arc<AppState>,input:WriteDocumentInput)->Result<DocumentContent,AppError>{write_inner(state,input,false)}

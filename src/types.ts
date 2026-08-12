@@ -4,7 +4,7 @@ export type Progress = "构思中" | "大纲筹备" | "撰写中" | "连载中" 
 export type Theme = "day" | "protect" | "night" | "parchment";
 
 export interface LibraryRoot { id:string; name:string; documentCount:number }
-export interface DocumentSummary { id:string; libraryId:string; relativePath:string; title:string; format:Format; wordCount:number; modifiedAt:number; gender:string; genre:string; subgenre:string; lengthKind:string; purpose:Purpose; progress:Progress; favorite:boolean; missing:boolean; tags:string[] }
+export interface DocumentSummary { id:string; libraryId:string; relativePath:string; title:string; format:Format; wordCount:number; modifiedAt:number; gender:string; genre:string; subgenre:string; lengthKind:string; purpose:Purpose; progress:Progress; favorite:boolean; missing:boolean; tags:string[]; readOffset:number }
 export interface TreeNode { name:string; relativePath:string; kind:"library"|"folder"|"document"; libraryId:string; documentId?:string; count:number; children:TreeNode[] }
 export interface ChapterNode { id:string; documentId:string; title:string; offset:number; kind:"auto"|"manual"; level:number }
 export interface Annotation { id:string; documentId:string; startOffset:number; endOffset:number; quote:string; prefix:string; suffix:string; note:string; marker:string; orphaned:boolean; createdAt:number }
@@ -15,7 +15,7 @@ export interface ReaderSettings { theme:Theme; fontFamily:string; fontSize:numbe
 export interface UserSettings { reader:ReaderSettings; shortcuts:Record<string,string>; alwaysOnTop:boolean }
 export interface AppSession { leftDocumentId?:string; rightDocumentId?:string; split:boolean; splitRatio:number; sidebarOpen:boolean; detailOpen:boolean; activeLibraryId?:string }
 export interface AppSnapshot { libraries:LibraryRoot[]; documents:DocumentSummary[]; tree:TreeNode[]; groups:VirtualGroup[]; materials:MaterialClip[]; settings:UserSettings; session:AppSession }
-export interface DocumentContent { summary:DocumentSummary; content:string; contentHash:string; encoding:string; newline:string; editable:boolean; chapters:ChapterNode[]; annotations:Annotation[]; readingProgress?:ReadingProgress }
+export interface DocumentContent { summary:DocumentSummary; absolutePath:string; content:string; contentHash:string; encoding:string; newline:string; editable:boolean; chapters:ChapterNode[]; annotations:Annotation[]; readingProgress?:ReadingProgress }
 export interface SearchQuery { text:string; tag?:string; libraryId?:string; lengthKind?:string; purpose?:Purpose; progress?:Progress; format?:Format }
 export interface SearchResult { document:DocumentSummary; snippet:string }
 

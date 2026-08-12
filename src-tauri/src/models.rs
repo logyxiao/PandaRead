@@ -47,7 +47,7 @@ pub struct DocumentSummary {
     pub id: String, pub library_id: String, pub relative_path: String, pub title: String,
     pub format: String, pub word_count: i64, pub modified_at: i64, pub gender: String,
     pub genre: String, pub subgenre: String, pub length_kind: String, pub purpose: String,
-    pub progress: String, pub favorite: bool, pub missing: bool, pub tags: Vec<String>,
+    pub progress: String, pub favorite: bool, pub missing: bool, pub tags: Vec<String>, pub read_offset: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,7 +95,7 @@ pub struct AppSnapshot { pub libraries: Vec<LibraryRoot>, pub documents: Vec<Doc
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DocumentContent { pub summary: DocumentSummary, pub content: String, pub content_hash: String, pub encoding: String, pub newline: String, pub editable: bool, pub chapters: Vec<ChapterNode>, pub annotations: Vec<Annotation>, pub reading_progress: Option<ReadingProgress> }
+pub struct DocumentContent { pub summary: DocumentSummary, pub absolute_path: String, pub content: String, pub content_hash: String, pub encoding: String, pub newline: String, pub editable: bool, pub chapters: Vec<ChapterNode>, pub annotations: Vec<Annotation>, pub reading_progress: Option<ReadingProgress> }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
