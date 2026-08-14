@@ -4,11 +4,13 @@ mod documents;
 mod epub;
 mod library;
 mod models;
+mod remote;
 
 use database::Database;
 use library::LibraryWatcher;
 use models::*;
 use parking_lot::Mutex;
+use remote::{RemoteManager, RemoteStatus};
 use std::{path::PathBuf, sync::{Arc, atomic::{AtomicBool, Ordering}}};
 use tauri::{Emitter, Manager, State};
 
@@ -70,8 +72,11 @@ async fn library_refresh(state: State<'_, SharedState>) -> Result<AppSnapshot, A
 }
 
 #[tauri::command]
-async fn document_read(state: State<'_, SharedState>, document_id: String) -> Result<DocumentContent, AppError> {
-    documents::read(&state, &document_id)
+async fn document_read(state: State<'_, SharedState>, remote: State<'_, Arc<RemoteManager>>, document_id: String) -> Result<DocumentContent, AppError> {
+    let content = documents::read(&state, &document_id)?;
+    // 双向跟随：桌面切换文稿时推送给所有已连接的手机
+    remote.broadcast_desktop_open(&document_id, &content.summary.title);
+    Ok(content)
 }
 
 #[tauri::command]
@@ -129,6 +134,26 @@ fn document_trash(state: State<'_, SharedState>, input: FileTargetInput) -> Resu
 fn document_update_meta(state: State<'_, SharedState>, input: DocumentMetaInput) -> Result<AppSnapshot, AppError> {
     state.db.update_document_meta(input)?;
     state.db.snapshot()
+}
+
+#[tauri::command]
+fn document_shelf(state: State<'_, SharedState>, document_id: String, shelf: String) -> Result<DocumentSummary, AppError> {
+    state.db.update_shelf(&document_id, &shelf)
+}
+
+/// 批量返回文档前几段预览（卡片视图用），单篇失败跳过不影响其余。
+#[tauri::command]
+async fn document_previews(state: State<'_, SharedState>, ids: Vec<String>) -> Result<Vec<serde_json::Value>, AppError> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut out = Vec::new();
+        for id in ids.iter().take(500) {
+            if let Ok(paragraphs) = documents::preview(&state, id, 3, 60) {
+                out.push(serde_json::json!({ "documentId": id, "paragraphs": paragraphs }));
+            }
+        }
+        Ok(out)
+    }).await.map_err(|error| AppError::Message(error.to_string()))?
 }
 
 #[tauri::command]
@@ -203,8 +228,35 @@ fn history_restore(state: State<'_, SharedState>, history_id: String, document_i
     documents::restore_history(&state, &history_id, &document_id)
 }
 
+#[tauri::command]
+fn remote_start(remote: State<'_, Arc<RemoteManager>>) -> Result<RemoteStatus, AppError> {
+    remote.start()
+}
+
+#[tauri::command]
+fn remote_stop(remote: State<'_, Arc<RemoteManager>>) -> Result<RemoteStatus, AppError> {
+    remote.stop();
+    Ok(remote.status())
+}
+
+#[tauri::command]
+fn remote_status(remote: State<'_, Arc<RemoteManager>>) -> Result<RemoteStatus, AppError> {
+    Ok(remote.status())
+}
+
+#[tauri::command]
+fn remote_tunnel_start(remote: State<'_, Arc<RemoteManager>>) -> Result<(), AppError> {
+    remote.tunnel_start()
+}
+
+#[tauri::command]
+fn remote_tunnel_stop(remote: State<'_, Arc<RemoteManager>>) -> Result<(), AppError> {
+    remote.tunnel_stop();
+    Ok(())
+}
+
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .setup(|app| {
@@ -217,19 +269,29 @@ pub fn run() {
                 initial_scan_started: AtomicBool::new(false),
             });
             app.manage(state.clone());
+            app.manage(Arc::new(RemoteManager::new(app.handle().clone(), state.clone())));
             library::start_watchers(&app.handle().clone(), &state).ok();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             bootstrap, app_snapshot, library_add, library_remove, library_refresh,
             document_read, document_write, document_force_write, document_save_as, document_tidy, document_create,
-            document_rename, document_move, document_trash, document_update_meta,
+            document_rename, document_move, document_trash, document_update_meta, document_shelf, document_previews,
             chapter_create, chapter_update, chapter_delete,
             annotation_save, annotation_delete, material_save,
             document_tag_update,
             group_create, group_toggle_document, search, reading_progress_save,
-            settings_save, session_save, history_list, history_restore
+            settings_save, session_save, history_list, history_restore,
+            remote_start, remote_stop, remote_status, remote_tunnel_start, remote_tunnel_stop
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Novalyte");
+        .build(tauri::generate_context!())
+        .expect("failed to build Novalyte");
+    app.run(|app_handle, event| {
+        // 退出时停止手机阅读服务与公网隧道，释放端口和子进程
+        if let tauri::RunEvent::Exit = event {
+            if let Some(remote) = app_handle.try_state::<Arc<RemoteManager>>() {
+                remote.stop_all();
+            }
+        }
+    });
 }

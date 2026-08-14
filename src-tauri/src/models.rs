@@ -47,7 +47,7 @@ pub struct DocumentSummary {
     pub id: String, pub library_id: String, pub relative_path: String, pub title: String,
     pub format: String, pub word_count: i64, pub modified_at: i64, pub gender: String,
     pub genre: String, pub subgenre: String, pub length_kind: String, pub purpose: String,
-    pub progress: String, pub favorite: bool, pub missing: bool, pub tags: Vec<String>, pub read_offset: i64,
+    pub progress: String, pub shelf: String, pub missing: bool, pub tags: Vec<String>, pub read_offset: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,11 +74,12 @@ pub struct VirtualGroup { pub id: String, pub name: String, pub document_ids: Ve
 #[serde(rename_all = "camelCase")]
 pub struct ReadingProgress { pub document_id: String, pub chapter_id: Option<String>, pub char_offset: i64, pub scroll_ratio: f64 }
 
+fn default_brightness() -> f64 { 1.0 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ReaderSettings { pub theme: String, pub font_family: String, pub font_size: f64, pub letter_spacing: f64, pub line_height: f64, pub paper_width: f64, pub page_margin: f64, pub speech_rate: f64 }
+pub struct ReaderSettings { pub theme: String, pub font_family: String, pub font_size: f64, pub letter_spacing: f64, pub line_height: f64, pub paper_width: f64, pub page_margin: f64, pub speech_rate: f64, #[serde(default = "default_brightness")] pub brightness: f64 }
 
-impl Default for ReaderSettings { fn default() -> Self { Self { theme: "day".into(), font_family: "serif".into(), font_size: 18.0, letter_spacing: 0.0, line_height: 1.95, paper_width: 760.0, page_margin: 56.0, speech_rate: 1.0 } } }
+impl Default for ReaderSettings { fn default() -> Self { Self { theme: "day".into(), font_family: "serif".into(), font_size: 18.0, letter_spacing: 0.0, line_height: 1.95, paper_width: 760.0, page_margin: 56.0, speech_rate: 1.0, brightness: 1.0 } } }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -112,7 +113,7 @@ pub struct FileMoveInput { pub source_library_id: String, pub relative_path: Str
 pub struct FileTargetInput { pub library_id: String, pub relative_path: String }
 
 #[derive(Debug, Deserialize)] #[serde(rename_all = "camelCase")]
-pub struct DocumentMetaInput { pub document_id: String, pub purpose: String, pub progress: String, pub length_kind: String, pub favorite: bool, pub gender: Option<String>, pub genre: Option<String>, pub subgenre: Option<String> }
+pub struct DocumentMetaInput { pub document_id: String, pub purpose: String, pub progress: String, pub length_kind: String, pub shelf: String, pub gender: Option<String>, pub genre: Option<String>, pub subgenre: Option<String> }
 
 #[derive(Debug, Deserialize)] #[serde(rename_all = "camelCase")]
 pub struct ChapterInput { pub document_id: String, pub title: String, pub offset: i64 }

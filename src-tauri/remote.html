@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f8faf8">
+<title>Novalyte 手机阅读</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%}
+body{font-family:"PingFang SC","Hiragino Sans GB",system-ui,sans-serif;color:#1b211e;background:#f8faf8;overscroll-behavior:none}
+body.night{color:#e7ebe8;background:#101312}
+.hidden{display:none!important}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+.view{min-height:100%;display:flex;flex-direction:column}
+/* 顶部栏 */
+.topbar{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:8px;min-height:46px;padding:env(safe-area-inset-top) 10px 0;background:rgba(248,250,248,.92);backdrop-filter:blur(12px);border-bottom:1px solid rgba(31,42,36,.09)}
+.night .topbar{background:rgba(16,19,18,.92);border-color:rgba(232,238,234,.08)}
+.topbar .back{width:32px;height:32px;display:grid;place-items:center;font-size:19px;border-radius:8px}
+.topbar .back:active{background:rgba(31,42,36,.08)}
+.topbar .titles{min-width:0;flex:1;display:grid;gap:1px}
+.topbar strong{overflow:hidden;font-size:15px;font-weight:600;text-overflow:ellipsis;white-space:nowrap}
+.topbar small{overflow:hidden;color:#929a95;font-size:10px;text-overflow:ellipsis;white-space:nowrap}
+.night .topbar small{color:#68726c}
+.topbar .tool{width:32px;height:32px;display:grid;place-items:center;border-radius:8px;font-size:15px}
+.topbar .tool:active{background:rgba(31,42,36,.08)}
+/* 配对页 */
+.pair-wrap{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:40px 28px;text-align:center}
+.pair-logo{width:58px;height:58px;display:grid;place-items:center;border-radius:14px;color:#fff;background:#245940;font-family:Georgia,serif;font-size:26px;font-weight:700}
+.pair-wrap h1{font-size:19px}
+.pair-wrap p{color:#68716c;font-size:13px;line-height:1.7}
+.night .pair-wrap p{color:#98a29c}
+.pair-status{color:#929a95;font-size:12px}
+.night .pair-status{color:#68726c}
+.pair-error{color:#bf4c4c;font-size:12px}
+.pair-input{width:210px;display:flex;gap:8px}
+.pair-input input{flex:1;min-width:0;height:46px;padding:0 10px;text-align:center;font-size:21px;letter-spacing:8px;background:#fff;border:1px solid rgba(31,42,36,.17);border-radius:10px;outline:none;caret-color:#14975a}
+.pair-input input:focus{border-color:#14975a}
+.night .pair-input input{background:#161a18;border-color:rgba(232,238,234,.14)}
+.pair-btn{height:46px;padding:0 22px;color:#fff;background:#14975a;border-radius:10px;font-size:14px}
+.pair-btn:disabled{opacity:.5}
+/* 列表 */
+.browse-list{flex:1;overflow-y:auto;padding:12px 14px 90px}
+.lib-card{width:100%;display:flex;align-items:center;gap:13px;padding:15px 16px;margin-bottom:10px;text-align:left;background:#fff;border:1px solid rgba(31,42,36,.1);border-radius:12px}
+.night .lib-card{background:#161a18;border-color:rgba(232,238,234,.1)}
+.lib-card:active{background:#e3eee7}
+.lib-cover{width:44px;height:52px;display:grid;place-items:center;flex:none;color:#fff;background:linear-gradient(150deg,#3b9468,#1d5940);border-radius:4px 8px 8px 4px;font-family:Georgia,serif;font-size:15px;font-weight:700}
+.lib-card .copy{min-width:0;flex:1;display:grid;gap:3px}
+.lib-card strong{overflow:hidden;font-size:15px;text-overflow:ellipsis;white-space:nowrap}
+.lib-card small{color:#929a95;font-size:11px}
+.night .lib-card small{color:#68726c}
+.lib-card .arrow{color:#c3c9c5;font-size:17px}
+.doc-card{display:grid;gap:9px;padding:14px 15px;margin-bottom:10px;background:#fff;border:1px solid rgba(31,42,36,.1);border-radius:12px;text-align:left}
+.night .doc-card{background:#161a18;border-color:rgba(232,238,234,.1)}
+.doc-card .card-head{min-width:0;display:grid;gap:4px}
+.doc-card .card-title{display:flex;align-items:center;gap:8px}
+.doc-card .card-title strong{min-width:0;flex:1;overflow:hidden;font-size:15px;font-weight:600;text-overflow:ellipsis;white-space:nowrap}
+.doc-card .card-shelf{flex:none;padding:2px 8px;border-radius:9px;font-size:9px}
+.doc-card .card-shelf.favorite{color:#8a6d1a;background:#f7edcf}
+.doc-card .card-shelf.pending{color:#2f6285;background:#e2eef7}
+.doc-card .card-shelf.dropped{color:#8a8f8b;background:#eceeec}
+.night .doc-card .card-shelf.favorite{color:#e2c26f;background:rgba(201,159,51,.15)}
+.night .doc-card .card-shelf.pending{color:#8fc1e8;background:rgba(90,143,184,.15)}
+.night .doc-card .card-shelf.dropped{color:#98a29c;background:rgba(152,162,156,.12)}
+.doc-card .card-meta{color:#929a95;font-size:10px}
+.night .doc-card .card-meta{color:#68726c}
+.doc-card .card-preview{display:grid;gap:5px;color:#4d5650;font-family:"Songti SC","Noto Serif SC","STSong",serif;font-size:12px;line-height:1.75}
+.night .doc-card .card-preview{color:#a9b3ad}
+.doc-card .card-preview p{margin:0;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.doc-card .card-actions{display:flex;gap:6px;padding-top:3px}
+.doc-card .card-actions button{min-width:0;flex:1;height:31px;display:flex;align-items:center;justify-content:center;gap:4px;padding:0 6px;color:#68716c;background:#f2f5f3;border-radius:8px;font-size:10.5px}
+.night .doc-card .card-actions button{color:#98a29c;background:rgba(232,238,234,.06)}
+.doc-card .card-actions button:active{background:#e3eee7}
+.doc-card .card-actions button.active{color:#fff}
+.doc-card .card-actions button.active.favorite{background:#d9a521}
+.doc-card .card-actions button.active.pending{background:#5a8fb8}
+.doc-card .card-actions button.active.dropped{background:#8a8f8b}
+.doc-card .card-actions .no-op{pointer-events:none}
+.card-loading{display:grid;place-items:center;min-height:160px;color:#929a95;font-size:12px;gap:8px}
+.night .card-loading{color:#68726c}
+.empty{display:grid;place-items:center;min-height:200px;color:#929a95;font-size:12px}
+/* 阅读页 */
+.reader-scroll{flex:1;overflow-y:auto;padding:18px 18px 120px;overscroll-behavior:contain}
+.paper{width:min(100%,640px);margin:0 auto}
+.paper h1{margin:6px 0 22px;padding-bottom:14px;border-bottom:1px solid rgba(31,42,36,.1);font-family:"Songti SC","Noto Serif SC",serif;font-size:21px;line-height:1.5}
+.night .paper h1{border-color:rgba(232,238,234,.1)}
+.reader-text{font-family:"Songti SC","Noto Serif SC","STSong",serif;line-height:1.9}
+.reader-text p{margin:0 0 1.15em;text-indent:2em;white-space:pre-wrap;font-size:17px}
+.reader-text.md-render p{text-indent:0;white-space:normal}
+.reader-text.md-render h1,.reader-text.md-render h2,.reader-text.md-render h3,.reader-text.md-render h4,.reader-text.md-render h5,.reader-text.md-render h6{margin:1.5em 0 .8em;line-height:1.5;font-weight:700}
+.reader-text.md-render h1{font-size:24px}.reader-text.md-render h2{font-size:21px}.reader-text.md-render h3{font-size:18px}.reader-text.md-render h4,.reader-text.md-render h5,.reader-text.md-render h6{font-size:17px}
+.reader-text.md-render ul,.reader-text.md-render ol{margin:0 0 1.15em;padding-left:1.6em;font-size:16px}
+.reader-text.md-render li{margin:.3em 0}
+.reader-text.md-render blockquote{margin:0 0 1.15em;padding:.4em 1em;color:#68716c;border-left:3px solid rgba(31,42,36,.2);background:rgba(31,42,36,.03)}
+.night .reader-text.md-render blockquote{color:#98a29c;border-color:rgba(232,238,234,.2);background:rgba(232,238,234,.04)}
+.reader-text.md-render hr{margin:2em auto;width:60%;border:0;border-top:1px solid rgba(31,42,36,.2)}
+.reader-text.md-render code{font:85%/1.5 ui-monospace,monospace;padding:.15em .4em;background:rgba(31,42,36,.07);border-radius:4px}
+.night .reader-text.md-render code{background:rgba(232,238,234,.08)}
+.reader-text.md-render pre{margin:0 0 1.15em;padding:1em;overflow:auto;background:rgba(31,42,36,.06);border-radius:8px;font-size:14px}
+.reader-text.md-render pre code{padding:0;background:none}
+.reader-text.md-render a{color:#14975a;text-decoration:underline}
+.reader-text.md-render strong{font-weight:700}
+/* 底部工具栏 */
+.toolbar{position:fixed;z-index:20;left:50%;bottom:calc(14px + env(safe-area-inset-bottom));transform:translateX(-50%);display:flex;align-items:center;gap:4px;padding:5px;background:rgba(255,255,255,.92);backdrop-filter:blur(12px);border:1px solid rgba(31,42,36,.12);border-radius:14px;box-shadow:0 10px 30px rgba(25,37,30,.12)}
+.night .toolbar{background:rgba(22,26,24,.94);border-color:rgba(232,238,234,.12)}
+.toolbar button{min-width:44px;height:38px;display:flex;align-items:center;justify-content:center;gap:4px;padding:0 10px;border-radius:9px;font-size:12px}
+.toolbar button:active{background:rgba(31,42,36,.07)}
+.night .toolbar button:active{background:rgba(232,238,234,.08)}
+.toolbar .font{font-weight:600}
+.toolbar .sep{width:1px;height:20px;background:rgba(31,42,36,.12)}
+/* 章节弹层 */
+.sheet-backdrop{position:fixed;z-index:40;inset:0;background:rgba(17,24,20,.35)}
+.sheet{position:fixed;z-index:41;left:0;right:0;bottom:0;max-height:62vh;display:flex;flex-direction:column;background:#fff;border-radius:16px 16px 0 0;padding-bottom:env(safe-area-inset-bottom)}
+.night .sheet{background:#161a18}
+.sheet header{display:flex;align-items:center;justify-content:space-between;padding:14px 18px 10px;border-bottom:1px solid rgba(31,42,36,.08)}
+.night .sheet header{border-color:rgba(232,238,234,.08)}
+.sheet header strong{font-size:14px}
+.sheet header span{color:#929a95;font-size:10px}
+.night .sheet header span{color:#68726c}
+.sheet .close{width:30px;height:30px;display:grid;place-items:center;font-size:16px;border-radius:8px}
+.sheet-list{overflow-y:auto;padding:6px 10px 14px}
+.sheet-list button{width:100%;display:flex;align-items:center;gap:10px;padding:11px 10px;text-align:left;border-radius:8px;font-size:13px}
+.sheet-list button:active{background:rgba(31,42,36,.06)}
+.night .sheet-list button:active{background:rgba(232,238,234,.07)}
+.sheet-list button span{flex:none;color:#929a95;font-size:10px}
+.night .sheet-list button span{color:#68726c}
+.sheet-list button strong{overflow:hidden;font-weight:400;text-overflow:ellipsis;white-space:nowrap}
+.sheet-list .no-chapter{padding:30px;text-align:center;color:#929a95;font-size:12px}
+/* 桌面跟随横幅 */
+.follow-banner{position:fixed;z-index:30;top:calc(10px + env(safe-area-inset-top));left:50%;transform:translateX(-50%);width:calc(100% - 28px);max-width:520px;display:flex;align-items:center;gap:10px;padding:10px 12px;background:rgba(36,89,64,.96);color:#fff;border-radius:12px;box-shadow:0 12px 34px rgba(20,30,24,.28);font-size:13px}
+.follow-banner .msg{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.follow-banner button{flex:none;padding:6px 14px;color:#245940;background:#fff;border-radius:8px;font-size:12px;font-weight:600}
+</style>
+</head>
+<body class="day">
+<!-- 配对页 -->
+<div id="pair-view" class="view hidden">
+  <div class="pair-wrap">
+    <div class="pair-logo">N</div>
+    <h1>Novalyte 手机阅读</h1>
+    <p id="pair-hint">正在连接电脑上的书库…</p>
+    <div id="pair-code-input" class="pair-input hidden">
+      <input id="code-input" inputmode="numeric" maxlength="6" placeholder="配对码" autocomplete="one-time-code">
+      <button id="code-submit" class="pair-btn">连接</button>
+    </div>
+    <span id="pair-error" class="pair-error"></span>
+    <span id="pair-status" class="pair-status"></span>
+  </div>
+</div>
+<!-- 书库 / 目录页 -->
+<div id="browse-view" class="view hidden">
+  <header class="topbar">
+    <button id="browse-back" class="back">‹</button>
+    <div class="titles"><strong id="browse-title">书库</strong><small id="browse-sub"></small></div>
+    <button id="browse-refresh" class="tool" title="刷新">⟳</button>
+  </header>
+  <div id="browse-list" class="browse-list"></div>
+</div>
+<!-- 阅读页 -->
+<div id="reader-view" class="view hidden">
+  <header class="topbar">
+    <button id="reader-back" class="back">‹</button>
+    <div class="titles"><strong id="reader-title"></strong><small id="reader-path"></small></div>
+    <button id="reader-theme" class="tool" title="夜间模式">☾</button>
+  </header>
+  <div id="reader-scroll" class="reader-scroll">
+    <div class="paper">
+      <h1 id="reader-h1"></h1>
+      <div id="reader-text" class="reader-text"></div>
+    </div>
+  </div>
+  <div class="toolbar">
+    <button id="tool-chapters" title="目录">目录</button>
+    <button id="tool-font-down" class="font" title="减小字号">A−</button>
+    <button id="tool-font-up" class="font" title="增大字号">A+</button>
+  </div>
+  <div id="sheet-backdrop" class="sheet-backdrop hidden"></div>
+  <div id="sheet" class="sheet hidden">
+    <header><div><strong>章节</strong> <span id="sheet-count"></span></div><button id="sheet-close" class="close">✕</button></header>
+    <div id="sheet-list" class="sheet-list"></div>
+  </div>
+</div>
+<!-- 桌面跟随横幅 -->
+<div id="follow-banner" class="follow-banner hidden">
+  <span class="msg" id="follow-msg"></span>
+  <button id="follow-jump">跳转</button>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var TOKEN_KEY = "novalyte-device-token";
+  var FONT_KEY = "novalyte-remote-font";
+  var THEME_KEY = "novalyte-remote-theme";
+  var state = {
+    token: null,
+    snapshot: null,
+    libraryId: null,
+    libraryName: "",
+    previewCache: {},
+    doc: null,
+    docId: null,
+    fontSize: Number(localStorage.getItem(FONT_KEY)) || 17,
+    theme: localStorage.getItem(THEME_KEY) || "day",
+    es: null,
+    saveTimer: null,
+    bannerTimer: null
+  };
+
+  var $ = function (id) { return document.getElementById(id); };
+  function show(id) {
+    ["pair-view", "browse-view", "reader-view"].forEach(function (v) {
+      $(v).classList.toggle("hidden", v !== id);
+    });
+  }
+  function applyTheme() {
+    document.body.className = state.theme;
+    document.querySelector('meta[name="theme-color"]').content = state.theme === "night" ? "#101312" : "#f8faf8";
+    $("reader-theme").textContent = state.theme === "night" ? "☀" : "☾";
+    $("reader-theme").title = state.theme === "night" ? "日间模式" : "夜间模式";
+  }
+  function detectDevice() {
+    var ua = navigator.userAgent;
+    if (/iPhone|iPad|iPod/i.test(ua)) return "iPhone";
+    if (/Android/i.test(ua)) return "Android";
+    return "手机设备";
+  }
+
+  // ---------- API ----------
+  function api(path, opts) {
+    opts = opts || {};
+    var headers = {};
+    if (state.token) headers["Authorization"] = "Bearer " + state.token;
+    if (opts.body) headers["Content-Type"] = "application/json";
+    return fetch(path, { method: opts.method || "GET", headers: headers, body: opts.body })
+      .then(function (res) {
+        if (res.status === 401) {
+          localStorage.removeItem(TOKEN_KEY);
+          state.token = null;
+          state.snapshot = null;
+          disconnectEvents();
+          showPair("会话已失效，请重新扫码");
+          return null;
+        }
+        if (!res.ok) return res.text().then(function (t) { throw new Error(t); });
+        return res.json();
+      });
+  }
+
+  // ---------- 配对 ----------
+  function showPair(message) {
+    show("pair-view");
+    $("pair-error").textContent = "";
+    $("pair-code-input").classList.add("hidden");
+    $("pair-status").textContent = "";
+    $("pair-hint").textContent = message || "正在连接电脑上的书库…";
+    fetch("/api/pair").then(function (res) { return res.json(); }).then(function (info) {
+      if (info.requirePairingCode) {
+        $("pair-hint").textContent = "请在电脑上查看 6 位配对码";
+        $("pair-code-input").classList.remove("hidden");
+        $("code-input").focus();
+      } else {
+        $("pair-hint").textContent = "已连接电脑，正在配对…";
+        doPair("");
+      }
+    }).catch(function () {
+      $("pair-hint").textContent = "无法连接电脑，请确认已启动手机阅读服务";
+    });
+  }
+  function doPair(code) {
+    $("pair-status").textContent = "配对中…";
+    fetch("/api/pair", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: code, deviceName: detectDevice() })
+    }).then(function (res) {
+      if (!res.ok) return res.text().then(function (t) { throw new Error(t); });
+      return res.json();
+    }).then(function (data) {
+      state.token = data.token;
+      localStorage.setItem(TOKEN_KEY, data.token);
+      enterApp();
+    }).catch(function (error) {
+      $("pair-error").textContent = error.message === "配对码错误" ? "配对码错误，请重新输入" : "配对失败：" + error.message;
+      $("pair-status").textContent = "";
+    });
+  }
+  $("code-submit").addEventListener("click", function () { doPair($("code-input").value.trim()); });
+  $("code-input").addEventListener("keydown", function (e) { if (e.key === "Enter") doPair(this.value.trim()); });
+  $("code-input").addEventListener("input", function () {
+    if (this.value.length === 6) doPair(this.value.trim());
+  });
+
+  // ---------- SSE（桌面跟随） ----------
+  function connectEvents() {
+    disconnectEvents();
+    if (!state.token) return;
+    var es = new EventSource("/api/events?token=" + encodeURIComponent(state.token));
+    es.addEventListener("desktop-open", function (event) {
+      try {
+        var data = JSON.parse(event.data);
+        if (!data.documentId || data.documentId === state.docId) return;
+        showFollowBanner("桌面端已打开《" + (data.title || "文稿") + "》", data.documentId);
+      } catch (e) { /* 忽略坏数据 */ }
+    });
+    state.es = es;
+  }
+  function disconnectEvents() {
+    if (state.es) { state.es.close(); state.es = null; }
+  }
+  function showFollowBanner(message, documentId) {
+    $("follow-msg").textContent = message;
+    $("follow-banner").classList.remove("hidden");
+    $("follow-jump").onclick = function () { hideFollowBanner(); openDoc(documentId); };
+    clearTimeout(state.bannerTimer);
+    state.bannerTimer = setTimeout(hideFollowBanner, 8000);
+  }
+  function hideFollowBanner() { $("follow-banner").classList.add("hidden"); }
+
+  // ---------- 书库 / 目录 ----------
+  function enterApp() {
+    api("/api/state").then(function (snapshot) {
+      if (!snapshot) return;
+      state.snapshot = snapshot;
+      state.libraryId = null;
+      connectEvents();
+      renderLibraries();
+      show("browse-view");
+    }).catch(function (error) {
+      showPair("加载书库失败：" + error.message);
+    });
+  }
+  function renderLibraries() {
+    $("browse-title").textContent = "书库";
+    $("browse-sub").textContent = state.snapshot.libraries.length + " 个目录";
+    $("browse-back").classList.add("hidden");
+    var list = $("browse-list");
+    list.innerHTML = "";
+    if (!state.snapshot.libraries.length) {
+      list.innerHTML = '<div class="empty">书库里还没有文稿</div>';
+      return;
+    }
+    state.snapshot.libraries.forEach(function (lib) {
+      var count = state.snapshot.documents.filter(function (d) { return d.libraryId === lib.id && !d.missing; }).length;
+      var card = document.createElement("button");
+      card.className = "lib-card";
+      card.innerHTML = '<span class="lib-cover">' + lib.name.charAt(0) + '</span>' +
+        '<span class="copy"><strong>' + escapeHtml(lib.name) + '</strong><small>' + count + ' 篇文稿</small></span>' +
+        '<span class="arrow">›</span>';
+      card.addEventListener("click", function () { openLibrary(lib.id, lib.name); });
+      list.appendChild(card);
+    });
+  }
+  function openLibrary(libraryId, name) {
+    state.libraryId = libraryId;
+    state.libraryName = name;
+    $("browse-title").textContent = name;
+    $("browse-sub").textContent = "";
+    $("browse-back").classList.remove("hidden");
+    loadCards(libraryId);
+  }
+  // 卡片列表：标题 + 前三段预览 + 手动分类操作（收藏/待定/弃用）
+  function loadCards(libraryId) {
+    var list = $("browse-list");
+    list.innerHTML = '<div class="card-loading">正在加载预览…</div>';
+    // 进库时刷新快照，同步桌面端最新的分类状态
+    api("/api/state").then(function (snapshot) {
+      if (!snapshot) return;
+      state.snapshot = snapshot;
+      var docs = state.snapshot.documents.filter(function (d) { return d.libraryId === libraryId && !d.missing; });
+      if (!docs.length) { list.innerHTML = '<div class="empty">这个书库还没有文稿</div>'; return; }
+      var render = function () { renderCards(docs); };
+      if (state.previewCache[libraryId]) { render(); return; }
+      return api("/api/previews", {
+        method: "POST",
+        body: JSON.stringify({ ids: docs.map(function (d) { return d.id; }) })
+      }).then(function (data) {
+        if (!data) return;
+        state.previewCache[libraryId] = {};
+        (data.cards || []).forEach(function (card) { state.previewCache[libraryId][card.documentId] = card.paragraphs || []; });
+        render();
+      });
+    }).catch(function () {
+      list.innerHTML = '<div class="empty">加载失败，请检查电脑端连接</div>';
+    });
+  }
+  function renderCards(docs) {
+    var list = $("browse-list");
+    list.innerHTML = "";
+    var previews = state.previewCache[state.libraryId] || {};
+    docs.forEach(function (doc) {
+      var card = document.createElement("div");
+      card.className = "doc-card";
+      var shelf = doc.shelf || "";
+      var shelfLabels = { favorite: "★ 收藏", pending: "◐ 待定", dropped: "✕ 弃用" };
+      var paras = previews[doc.id] || [];
+      var folder = doc.relativePath.split("/").slice(0, -1).join("/");
+      card.innerHTML =
+        '<div class="card-head"><div class="card-title"><strong>' + escapeHtml(doc.title) + "</strong>" +
+        (shelf ? '<span class="card-shelf ' + shelf + '">' + shelfLabels[shelf] + "</span>" : "") +
+        '</div><div class="card-meta">' + escapeHtml(folder || "书库根目录") + " · " + doc.wordCount.toLocaleString() + " 字</div></div>" +
+        '<div class="card-preview">' + (paras.length ? paras.map(function (p) { return "<p>" + escapeHtml(p) + "</p>"; }).join("") : "<p>（暂无预览）</p>") + "</div>" +
+        '<div class="card-actions">' +
+        '<button class="favorite' + (shelf === "favorite" ? " active" : "") + '" data-shelf="favorite">★ 收藏</button>' +
+        '<button class="pending' + (shelf === "pending" ? " active" : "") + '" data-shelf="pending">◐ 待定</button>' +
+        '<button class="dropped' + (shelf === "dropped" ? " active" : "") + '" data-shelf="dropped">✕ 弃用</button>' +
+        "</div>";
+      card.querySelector(".card-head").addEventListener("click", function () { openDoc(doc.id); });
+      card.querySelectorAll(".card-actions button").forEach(function (button) {
+        button.addEventListener("click", function (event) {
+          event.stopPropagation();
+          setShelf(doc, button.dataset.shelf);
+        });
+      });
+      list.appendChild(card);
+    });
+  }
+  // 再次点击当前分类 = 取消分类；本地立即生效并同步到桌面
+  function setShelf(doc, shelf) {
+    var next = doc.shelf === shelf ? "" : shelf;
+    doc.shelf = next;
+    api("/api/shelf", { method: "POST", body: JSON.stringify({ documentId: doc.id, shelf: next }) });
+    renderCards(state.snapshot.documents.filter(function (d) { return d.libraryId === state.libraryId && !d.missing; }));
+  }
+  $("browse-back").addEventListener("click", function () {
+    if (state.libraryId) { state.libraryId = null; renderLibraries(); }
+  });
+  $("browse-refresh").addEventListener("click", function () { enterApp(); });
+
+  // ---------- 阅读 ----------
+  function openDoc(documentId) {
+    $("follow-banner").classList.add("hidden");
+    api("/api/document/" + encodeURIComponent(documentId)).then(function (doc) {
+      if (!doc) return;
+      state.doc = doc;
+      state.docId = documentId;
+      var paragraphs = (doc.content || "").split(/\n+/).filter(Boolean);
+      $("reader-h1").textContent = doc.summary.title;
+      $("reader-title").textContent = doc.summary.title;
+      $("reader-path").textContent = doc.summary.relativePath;
+      var text = $("reader-text");
+      text.innerHTML = "";
+      if (doc.summary.format === "md") {
+        // md 文件按 Markdown 渲染
+        text.classList.add("md-render");
+        text.innerHTML = renderMarkdown(doc.content || "");
+      } else {
+        text.classList.remove("md-render");
+        paragraphs.forEach(function (p) {
+          var el = document.createElement("p");
+          el.textContent = p;
+          text.appendChild(el);
+        });
+      }
+      applyFontSize();
+      show("reader-view");
+      // 通知桌面端（双向跟随）
+      api("/api/open", { method: "POST", body: JSON.stringify({ documentId: documentId }) });
+      // 恢复阅读进度
+      var scroll = $("reader-scroll");
+      if (doc.readingProgress && doc.readingProgress.scrollRatio) {
+        scroll.scrollTop = doc.readingProgress.scrollRatio * Math.max(0, scroll.scrollHeight - scroll.clientHeight);
+      } else {
+        scroll.scrollTop = 0;
+      }
+      renderChapters();
+    }).catch(function (error) {
+      showPair("打开文稿失败：" + error.message);
+    });
+  }
+  function applyFontSize() {
+    $("reader-text").style.fontSize = state.fontSize + "px";
+  }
+  function saveProgress() {
+    clearTimeout(state.saveTimer);
+    state.saveTimer = setTimeout(function () {
+      var scroll = $("reader-scroll");
+      var ratio = scroll.scrollTop / Math.max(1, scroll.scrollHeight - scroll.clientHeight);
+      var charOffset = Math.round((state.doc.content || "").length * ratio);
+      api("/api/progress", {
+        method: "POST",
+        body: JSON.stringify({ documentId: state.docId, charOffset: charOffset, scrollRatio: ratio })
+      });
+    }, 600);
+  }
+  $("reader-scroll").addEventListener("scroll", saveProgress);
+  $("reader-back").addEventListener("click", function () {
+    clearTimeout(state.saveTimer);
+    state.doc = null;
+    state.docId = null;
+    if (state.libraryId) openLibrary(state.libraryId, state.libraryName);
+    else renderLibraries();
+    show("browse-view");
+  });
+  $("reader-theme").addEventListener("click", function () {
+    state.theme = state.theme === "night" ? "day" : "night";
+    localStorage.setItem(THEME_KEY, state.theme);
+    applyTheme();
+  });
+  $("tool-font-down").addEventListener("click", function () { changeFont(-1); });
+  $("tool-font-up").addEventListener("click", function () { changeFont(1); });
+  function changeFont(delta) {
+    state.fontSize = Math.max(14, Math.min(28, state.fontSize + delta));
+    localStorage.setItem(FONT_KEY, String(state.fontSize));
+    applyFontSize();
+  }
+  // 章节
+  function renderChapters() {
+    var chapters = state.doc.chapters || [];
+    $("sheet-count").textContent = chapters.length + " 个阅读节点";
+    var list = $("sheet-list");
+    list.innerHTML = "";
+    if (!chapters.length) {
+      list.innerHTML = '<div class="no-chapter">这篇文稿暂未识别到章节节点</div>';
+      return;
+    }
+    chapters.forEach(function (chapter, index) {
+      var button = document.createElement("button");
+      button.innerHTML = "<span>" + String(index + 1).padStart(2, "0") + "</span><strong>" + escapeHtml(chapter.title) + "</strong>";
+      button.addEventListener("click", function () {
+        closeSheet();
+        var scroll = $("reader-scroll");
+        var offset = chapter.offset / Math.max(1, state.doc.content.length);
+        scroll.scrollTop = offset * (scroll.scrollHeight - scroll.clientHeight);
+      });
+      list.appendChild(button);
+    });
+  }
+  function openSheet() {
+    renderChapters();
+    $("sheet-backdrop").classList.remove("hidden");
+    $("sheet").classList.remove("hidden");
+  }
+  function closeSheet() {
+    $("sheet-backdrop").classList.add("hidden");
+    $("sheet").classList.add("hidden");
+  }
+  $("tool-chapters").addEventListener("click", openSheet);
+  $("sheet-close").addEventListener("click", closeSheet);
+  $("sheet-backdrop").addEventListener("click", closeSheet);
+
+  // ---------- Markdown 渲染（单文件内联轻量实现：先转义再套语法，无注入风险） ----------
+  function renderMarkdown(text) {
+    var html = escapeHtml(text);
+    html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
+    html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    html = html.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+    html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2">$1</a>');
+    var lines = html.split("\n");
+    var out = [], codeBuf = [], listBuf = [], inCode = false, inList = false;
+    function flushList() {
+      if (!inList) return;
+      out.push("<ul>" + listBuf.join("") + "</ul>");
+      listBuf = []; inList = false;
+    }
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      if (/^\s*```/.test(line)) {
+        if (inCode) { out.push("<pre>" + codeBuf.join("\n") + "</pre>"); codeBuf = []; inCode = false; }
+        else { flushList(); inCode = true; }
+        continue;
+      }
+      if (inCode) { codeBuf.push(line); continue; }
+      var heading = line.match(/^(#{1,6})\s+(.*)$/);
+      if (heading) { flushList(); var level = heading[1].length; out.push("<h" + level + ">" + heading[2] + "</h" + level + ">"); continue; }
+      if (/^\s*([-*_])\1{2,}\s*$/.test(line)) { flushList(); out.push("<hr>"); continue; }
+      if (/^\s*&gt;\s?/.test(line)) { flushList(); out.push("<blockquote>" + line.replace(/^\s*&gt;\s?/, "") + "</blockquote>"); continue; }
+      var item = line.match(/^\s*([-*+]|\d+[.)])\s+(.*)$/);
+      if (item) { listBuf.push("<li>" + item[2] + "</li>"); inList = true; continue; }
+      flushList();
+      if (line.trim()) out.push("<p>" + line.trim() + "</p>");
+    }
+    flushList();
+    if (inCode && codeBuf.length) out.push("<pre>" + codeBuf.join("\n") + "</pre>");
+    return out.join("");
+  }
+
+  function escapeHtml(text) {
+    return String(text).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  // ---------- 启动 ----------
+  applyTheme();
+  var stored = localStorage.getItem(TOKEN_KEY);
+  if (location.hash === "#pair") {
+    location.hash = "";
+    localStorage.removeItem(TOKEN_KEY);
+    stored = null;
+    showPair("请确认配对");
+  }
+  if (stored) {
+    state.token = stored;
+    enterApp();
+  } else {
+    showPair();
+  }
+})();
+</script>
+</body>
+</html>

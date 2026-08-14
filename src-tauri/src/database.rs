@@ -76,6 +76,16 @@ impl Database {
             if free > 20_000 { conn.execute_batch("VACUUM;")?; }
             conn.execute_batch("INSERT OR IGNORE INTO schema_migrations(version) VALUES(2);")?;
         }
+        // Migration v3: 手动分类替代收藏布尔位 —— shelf 取值 ''/favorite/pending/dropped，
+        // 并把旧的 favorite=1 迁移为 shelf='favorite'。
+        let migrated: bool = conn.query_row("SELECT NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version>=3)", [], |r| r.get(0))?;
+        if migrated {
+            conn.execute_batch(r#"
+              ALTER TABLE documents ADD COLUMN shelf TEXT NOT NULL DEFAULT '';
+              UPDATE documents SET shelf='favorite' WHERE favorite=1;
+              INSERT OR IGNORE INTO schema_migrations(version) VALUES(3);
+            "#)?;
+        }
         Ok(Self { conn: Arc::new(Mutex::new(conn)) })
     }
 
@@ -165,7 +175,7 @@ impl Database {
     }
 
     pub fn documents(&self) -> Result<Vec<DocumentSummary>,AppError> {
-        let conn=self.conn.lock(); let mut stmt=conn.prepare("SELECT id,library_id,relative_path,title,format,word_count,modified_at,gender,genre,subgenre,length_kind,purpose,progress,favorite,missing,(SELECT COALESCE(json_group_array(tag),'[]') FROM document_tags WHERE document_id=documents.id),COALESCE((SELECT char_offset FROM reading_progress WHERE document_id=documents.id),0) FROM documents ORDER BY relative_path COLLATE NOCASE")?;
+        let conn=self.conn.lock(); let mut stmt=conn.prepare("SELECT id,library_id,relative_path,title,format,word_count,modified_at,gender,genre,subgenre,length_kind,purpose,progress,shelf,missing,(SELECT COALESCE(json_group_array(tag),'[]') FROM document_tags WHERE document_id=documents.id),COALESCE((SELECT char_offset FROM reading_progress WHERE document_id=documents.id),0) FROM documents ORDER BY relative_path COLLATE NOCASE")?;
         let rows = stmt.query_map([], row_document)?.collect::<Result<_,_>>()?;
         Ok(rows)
     }
@@ -186,9 +196,9 @@ impl Database {
 
     pub fn stored_document(&self,id:&str)->Result<StoredDocument,AppError>{
         let conn=self.conn.lock();
-        conn.query_row(r#"SELECT d.id,d.library_id,d.relative_path,d.title,d.format,d.word_count,d.modified_at,d.gender,d.genre,d.subgenre,d.length_kind,d.purpose,d.progress,d.favorite,d.missing,l.root_path,d.content_hash,d.encoding,d.newline,(SELECT COALESCE(json_group_array(tag),'[]') FROM document_tags WHERE document_id=d.id),COALESCE((SELECT char_offset FROM reading_progress WHERE document_id=d.id),0)
+        conn.query_row(r#"SELECT d.id,d.library_id,d.relative_path,d.title,d.format,d.word_count,d.modified_at,d.gender,d.genre,d.subgenre,d.length_kind,d.purpose,d.progress,d.shelf,d.missing,l.root_path,d.content_hash,d.encoding,d.newline,(SELECT COALESCE(json_group_array(tag),'[]') FROM document_tags WHERE document_id=d.id),COALESCE((SELECT char_offset FROM reading_progress WHERE document_id=d.id),0)
           FROM documents d JOIN libraries l ON l.id=d.library_id WHERE d.id=?1"#, [id], |r| Ok(StoredDocument{
-            summary: DocumentSummary{id:r.get(0)?,library_id:r.get(1)?,relative_path:r.get(2)?,title:r.get(3)?,format:r.get(4)?,word_count:r.get(5)?,modified_at:r.get(6)?,gender:r.get(7)?,genre:r.get(8)?,subgenre:r.get(9)?,length_kind:r.get(10)?,purpose:r.get(11)?,progress:r.get(12)?,favorite:r.get::<_,i64>(13)?!=0,missing:r.get::<_,i64>(14)?!=0,tags:serde_json::from_str(&r.get::<_,String>(19)?).unwrap_or_default(),read_offset:r.get(20)?},
+            summary: DocumentSummary{id:r.get(0)?,library_id:r.get(1)?,relative_path:r.get(2)?,title:r.get(3)?,format:r.get(4)?,word_count:r.get(5)?,modified_at:r.get(6)?,gender:r.get(7)?,genre:r.get(8)?,subgenre:r.get(9)?,length_kind:r.get(10)?,purpose:r.get(11)?,progress:r.get(12)?,shelf:r.get(13)?,missing:r.get::<_,i64>(14)?!=0,tags:serde_json::from_str(&r.get::<_,String>(19)?).unwrap_or_default(),read_offset:r.get(20)?},
             root_path:PathBuf::from(r.get::<_,String>(15)?),content_hash:r.get(16)?,newline:r.get(18)?
         })).optional()?.ok_or(AppError::NotFound)
     }
@@ -217,7 +227,13 @@ impl Database {
     pub fn toggle_group_document(&self,g:&str,d:&str)->Result<(),AppError>{let conn=self.conn.lock();let exists:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM group_documents WHERE group_id=?1 AND document_id=?2)",params![g,d],|r|r.get(0))?;if exists{conn.execute("DELETE FROM group_documents WHERE group_id=?1 AND document_id=?2",params![g,d])?;}else{conn.execute("INSERT INTO group_documents(group_id,document_id) VALUES(?1,?2)",params![g,d])?;}Ok(())}
     pub fn groups(&self)->Result<Vec<VirtualGroup>,AppError>{let conn=self.conn.lock();let mut s=conn.prepare("SELECT id,name FROM groups ORDER BY created_at")?;let base=s.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<Result<Vec<_>,_>>()?;let mut out=Vec::new();for(id,name)in base{let mut ds=conn.prepare("SELECT document_id FROM group_documents WHERE group_id=?1")?;let ids=ds.query_map([&id],|r|r.get(0))?.collect::<Result<_,_>>()?;out.push(VirtualGroup{id,name,document_ids:ids});}Ok(out)}
 
-    pub fn update_document_meta(&self,i:DocumentMetaInput)->Result<(),AppError>{self.conn.lock().execute("UPDATE documents SET purpose=?2,progress=?3,length_kind=?4,favorite=?5,gender=COALESCE(?6,gender),genre=COALESCE(?7,genre),subgenre=COALESCE(?8,subgenre) WHERE id=?1",params![i.document_id,i.purpose,i.progress,i.length_kind,i.favorite as i64,i.gender,i.genre,i.subgenre])?;Ok(())}
+    pub fn update_document_meta(&self,i:DocumentMetaInput)->Result<(),AppError>{self.conn.lock().execute("UPDATE documents SET purpose=?2,progress=?3,length_kind=?4,shelf=?5,gender=COALESCE(?6,gender),genre=COALESCE(?7,genre),subgenre=COALESCE(?8,subgenre) WHERE id=?1",params![i.document_id,i.purpose,i.progress,i.length_kind,i.shelf,i.gender,i.genre,i.subgenre])?;Ok(())}
+    /// 手动分类：弃用 / 待定 / 收藏（shelf 取值 ''/dropped/pending/favorite）
+    pub fn update_shelf(&self,document_id:&str,shelf:&str)->Result<DocumentSummary,AppError>{
+        let shelf=match shelf {"favorite"|"pending"|"dropped"|""=>shelf,_=>""};
+        self.conn.lock().execute("UPDATE documents SET shelf=?2 WHERE id=?1",params![document_id,shelf])?;
+        self.stored_document(document_id).map(|stored|stored.summary)
+    }
     pub fn save_progress(&self,p:ReadingProgress)->Result<(),AppError>{self.conn.lock().execute(r#"INSERT INTO reading_progress(document_id,chapter_id,char_offset,scroll_ratio,updated_at) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(document_id) DO UPDATE SET chapter_id=excluded.chapter_id,char_offset=excluded.char_offset,scroll_ratio=excluded.scroll_ratio,updated_at=excluded.updated_at"#,params![p.document_id,p.chapter_id,p.char_offset,p.scroll_ratio,now()])?;Ok(())}
     pub fn progress(&self,id:&str)->Result<Option<ReadingProgress>,AppError>{Ok(self.conn.lock().query_row("SELECT document_id,chapter_id,char_offset,scroll_ratio FROM reading_progress WHERE document_id=?1",[id],|r|Ok(ReadingProgress{document_id:r.get(0)?,chapter_id:r.get(1)?,char_offset:r.get(2)?,scroll_ratio:r.get(3)?})).optional()?)}
 
@@ -252,7 +268,7 @@ impl Database {
     }
 }
 
-fn row_document(r:&rusqlite::Row<'_>)->rusqlite::Result<DocumentSummary>{Ok(DocumentSummary{id:r.get(0)?,library_id:r.get(1)?,relative_path:r.get(2)?,title:r.get(3)?,format:r.get(4)?,word_count:r.get(5)?,modified_at:r.get(6)?,gender:r.get(7)?,genre:r.get(8)?,subgenre:r.get(9)?,length_kind:r.get(10)?,purpose:r.get(11)?,progress:r.get(12)?,favorite:r.get::<_,i64>(13)?!=0,missing:r.get::<_,i64>(14)?!=0,tags:serde_json::from_str(&r.get::<_,String>(15)?).unwrap_or_default(),read_offset:r.get(16)?})}
+fn row_document(r:&rusqlite::Row<'_>)->rusqlite::Result<DocumentSummary>{Ok(DocumentSummary{id:r.get(0)?,library_id:r.get(1)?,relative_path:r.get(2)?,title:r.get(3)?,format:r.get(4)?,word_count:r.get(5)?,modified_at:r.get(6)?,gender:r.get(7)?,genre:r.get(8)?,subgenre:r.get(9)?,length_kind:r.get(10)?,purpose:r.get(11)?,progress:r.get(12)?,shelf:r.get(13)?,missing:r.get::<_,i64>(14)?!=0,tags:serde_json::from_str(&r.get::<_,String>(15)?).unwrap_or_default(),read_offset:r.get(16)?})}
 fn build_tree(node:&mut TreeNode,root:&Path,dir:&Path,library_id:&str,doc_by_key:&HashMap<(String,String),String>){
     let Ok(entries)=fs::read_dir(dir)else{return;};
     let mut entries:Vec<_>=entries.flatten().collect();
@@ -274,7 +290,8 @@ fn build_tree(node:&mut TreeNode,root:&Path,dir:&Path,library_id:&str,doc_by_key
             node.children.push(child);
         }else if ft.is_file(){
             let ext=path.extension().and_then(|s|s.to_str()).unwrap_or("").to_lowercase();
-            if ext!="txt"&&ext!="epub"{continue;}
+            // 与扫描规则一致：md 仅收录「正文.md」
+            if ext!="txt"&&ext!="epub"{if !(ext=="md"&&path.file_stem().and_then(|s|s.to_str()).unwrap_or("")=="正文"){continue;}}
             let id=doc_by_key.get(&(library_id.to_string(),relative.clone())).cloned();
             node.children.push(TreeNode{name,relative_path:relative,kind:"document".into(),library_id:library_id.into(),document_id:id,count:0,children:Vec::new()});
         }
@@ -310,7 +327,7 @@ mod tests {
         assert_eq!(d.summary.length_kind,"长篇");
         assert_eq!(d.content_hash,"hash1");
         // manual length_kind survives later reads
-        db.update_document_meta(DocumentMetaInput{document_id:id.clone(),purpose:"原创".into(),progress:"构思中".into(),length_kind:"短篇".into(),favorite:false,gender:None,genre:None,subgenre:None}).unwrap();
+        db.update_document_meta(DocumentMetaInput{document_id:id.clone(),purpose:"原创".into(),progress:"构思中".into(),length_kind:"短篇".into(),shelf:"favorite".into(),gender:None,genre:None,subgenre:None}).unwrap();
         db.update_after_read(&id,"hash2","utf-8","\n",100_000).unwrap();
         assert_eq!(db.stored_document(&id).unwrap().summary.length_kind,"短篇");
         // seen files are not missing, unseen ones are; re-upsert keeps rows stable
@@ -365,11 +382,20 @@ mod tests {
         assert_eq!(empty.kind,"folder");
         assert_eq!(empty.count,0);
         assert!(empty.children.is_empty());
+
+        // 「正文.md」进入目录树，其他 md（设定.md 等）不显示
+        fs::write(tmp.join("b/正文.md"),"hi").unwrap();
+        fs::write(tmp.join("b/设定.md"),"hi").unwrap();
+        db.upsert_documents(&[entry("b/正文.md",1),entry("b/设定.md",1)]).unwrap();
+        let lib=&db.tree().unwrap()[0];
+        let b=lib.children.iter().find(|c|c.name=="b").unwrap();
+        assert!(b.children.iter().any(|c|c.name=="正文.md"&&c.document_id.is_some()));
+        assert!(b.children.iter().all(|c|c.name!="设定.md"));
         // 文件夹排在文件前面
         assert_eq!(a.children[0].name,"empty");
         assert_eq!(a.children[0].kind,"folder");
         let b=lib.children.iter().find(|c|c.name=="b").unwrap();
-        assert_eq!(b.count,2);
+        assert_eq!(b.count,3); // y.txt + ignore.txt + 正文.md
         // 隐藏文件被跳过（ignore.txt 是合法 txt，应计入）
         assert!(b.children.iter().all(|c|c.name!=".h.txt"));
         let _=fs::remove_dir_all(&tmp);
