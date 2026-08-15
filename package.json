@@ -2,7 +2,7 @@
   "name": "novalyte",
   "private": true,
   "version": "0.1.0",
-  "description": "Novalyte - local-first fiction library and comparison workspace",
+  "description": "熊猫阅读 - local-first fiction library",
   "type": "module",
   "scripts": {
     "dev": "tauri dev",

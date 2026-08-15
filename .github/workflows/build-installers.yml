@@ -46,6 +46,11 @@ jobs:
 
       - run: npm ci
 
+      # icon.png is tracked; generate the platform-specific Tauri icon set in CI.
+      # Local generated icon files are intentionally not required in git.
+      - name: Generate Tauri icons
+        run: npm run tauri -- icon src-tauri/icons/icon.png --output src-tauri/icons
+
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Novalyte",
+  "productName": "熊猫阅读",
   "version": "0.1.0",
   "identifier": "com.novalyte.desktop",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Novalyte",
+        "title": "熊猫阅读",
         "width": 1440,
         "height": 900,
         "minWidth": 980,

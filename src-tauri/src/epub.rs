@@ -9,7 +9,7 @@ pub struct ParsedEpub { pub text: String, pub chapters: Vec<ChapterNode> }
 
 pub fn parse(path:&Path,document_id:&str)->Result<ParsedEpub,AppError>{
     let file=File::open(path)?;let mut zip=ZipArchive::new(file)?;
-    if zip.by_name("META-INF/encryption.xml").is_ok(){return Err(AppError::Message("该 EPUB 已加密，Novalyte 无法读取".into()));}
+    if zip.by_name("META-INF/encryption.xml").is_ok(){return Err(AppError::Message("该 EPUB 已加密，熊猫阅读无法读取".into()));}
     let mut container=String::new();zip.by_name("META-INF/container.xml")?.read_to_string(&mut container)?;
     let doc=Document::parse(&container).map_err(|_|AppError::Message("EPUB 容器信息损坏".into()))?;
     let opf_path=doc.descendants().find(|n|n.has_tag_name("rootfile")).and_then(|n|n.attribute("full-path")).ok_or_else(||AppError::Message("EPUB 缺少内容索引".into()))?.to_string();

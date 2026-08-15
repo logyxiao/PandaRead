@@ -1,8 +1,8 @@
 [package]
 name = "novalyte"
 version = "0.1.0"
-description = "Local-first fiction library and comparison workspace"
-authors = ["Novalyte"]
+description = "熊猫阅读 - local-first fiction library"
+authors = ["熊猫阅读"]
 edition = "2021"
 
 [lib]

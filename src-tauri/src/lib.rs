@@ -296,7 +296,7 @@ pub fn run() {
             remote_start, remote_stop, remote_status, remote_tunnel_start, remote_tunnel_stop
         ])
         .build(tauri::generate_context!())
-        .expect("failed to build Novalyte");
+        .expect("failed to build 熊猫阅读");
     app.run(|app_handle, event| {
         // 退出时停止手机阅读服务与公网隧道，释放端口和子进程
         if let tauri::RunEvent::Exit = event {
