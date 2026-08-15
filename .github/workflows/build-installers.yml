@@ -14,10 +14,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # universal-apple-darwin target 已被 Rust 官方移除，改为双架构各出 dmg
           - platform: macos-latest
-            args: --target universal-apple-darwin
+            name: macos-arm64
+            args: --target aarch64-apple-darwin
+            rust_target: aarch64-apple-darwin
+          - platform: macos-latest
+            name: macos-x64
+            args: --target x86_64-apple-darwin
+            rust_target: x86_64-apple-darwin
           - platform: windows-latest
+            name: windows-x64
             args: --bundles nsis
+            rust_target: ''
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -29,7 +38,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'universal-apple-darwin' || '' }}
+          targets: ${{ matrix.rust_target }}
 
       - uses: swatinem/rust-cache@v2
         with:
@@ -61,7 +70,8 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: installer-${{ matrix.platform }}
+          name: installer-${{ matrix.name }}
           path: |
-            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
