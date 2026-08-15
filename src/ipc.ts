@@ -24,6 +24,7 @@ export const api = {
   saveAnnotation:(input:object)=>call<Annotation[]>("annotation_save",{input}), deleteAnnotation:(annotationId:string,documentId:string)=>call<Annotation[]>("annotation_delete",{annotationId,documentId}), saveMaterial:(input:object)=>call<MaterialClip[]>("material_save",{input}),
   search:(query:SearchQuery)=>call<SearchResult[]>("search",{query}), saveProgress:(input:object)=>call<void>("reading_progress_save",{input}), saveSettings:(settings:UserSettings)=>call<void>("settings_save",{settings}), saveSession:(session:AppSession)=>call<void>("session_save",{session}),
   history:(documentId:string)=>call<unknown[]>("history_list",{documentId}), restoreHistory:(historyId:string,documentId:string)=>call<DocumentContent>("history_restore",{historyId,documentId}),
+  exportDocx:(documentId:string)=>call<string>("document_export_docx",{documentId}),
   remoteStart:()=>call<RemoteStatus>("remote_start"), remoteStop:()=>call<RemoteStatus>("remote_stop"), remoteStatus:()=>call<RemoteStatus>("remote_status"),
   remoteTunnelStart:()=>call<void>("remote_tunnel_start"), remoteTunnelStop:()=>call<void>("remote_tunnel_stop"),
   onPhoneOpen:(handler:(payload:{documentId:string;title:string;deviceName:string})=>void)=>listen<{documentId:string;title:string;deviceName:string}>("remote:phone-open",e=>handler(e.payload)),

@@ -1,5 +1,6 @@
 mod chapters;
 mod database;
+mod docx;
 mod documents;
 mod epub;
 mod library;
@@ -228,6 +229,16 @@ fn history_restore(state: State<'_, SharedState>, history_id: String, document_i
     documents::restore_history(&state, &history_id, &document_id)
 }
 
+/// 导出文稿为 Word（宋体小四、1.5 倍行距、###N. 章节转第N章），
+/// 输出到源文件所在目录，文件名与文档顶部标题取小说标题（正文.md 用父文件夹名）。
+#[tauri::command]
+async fn document_export_docx(state: State<'_, SharedState>, document_id: String) -> Result<String, AppError> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || docx::export(&state, &document_id))
+        .await
+        .map_err(|error| AppError::Message(error.to_string()))?
+}
+
 #[tauri::command]
 fn remote_start(remote: State<'_, Arc<RemoteManager>>) -> Result<RemoteStatus, AppError> {
     remote.start()
@@ -281,7 +292,7 @@ pub fn run() {
             annotation_save, annotation_delete, material_save,
             document_tag_update,
             group_create, group_toggle_document, search, reading_progress_save,
-            settings_save, session_save, history_list, history_restore,
+            settings_save, session_save, history_list, history_restore, document_export_docx,
             remote_start, remote_stop, remote_status, remote_tunnel_start, remote_tunnel_stop
         ])
         .build(tauri::generate_context!())
