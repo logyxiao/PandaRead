@@ -652,14 +652,14 @@ fn start_tunnel_process(mgr: &Arc<RemoteManager>, port: u16) -> Result<TunnelHan
     let binary = ensure_cloudflared(&mgr.state.data_dir)?;
     let mut child = Command::new(&binary)
         .args(["tunnel", "--url", &format!("http://127.0.0.1:{port}"), "--no-autoupdate"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped()) // cloudflared 日志（含公网 URL）输出到 stderr
         .spawn()
         .map_err(|error| AppError::Message(format!("启动 cloudflared 失败：{error}")))?;
-    let stdout = child.stdout.take().ok_or_else(|| AppError::Message("无法读取 cloudflared 输出".into()))?;
+    let stderr = child.stderr.take().ok_or_else(|| AppError::Message("无法读取 cloudflared 输出".into()))?;
     let (sender, receiver) = mpsc::channel::<String>();
     std::thread::spawn(move || {
-        let mut reader = io::BufReader::new(stdout);
+        let mut reader = io::BufReader::new(stderr);
         let mut line = String::new();
         while reader.read_line(&mut line).is_ok() && !line.is_empty() {
             if let Some(start) = line.find("https://") {
