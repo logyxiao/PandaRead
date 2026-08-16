@@ -1,7 +1,7 @@
 use crate::models::*;
 use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
-use std::{collections::{HashMap,HashSet}, fs, path::{Path,PathBuf}, sync::Arc};
+use std::{collections::{HashMap,HashSet}, path::{Path,PathBuf}, sync::Arc};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -15,7 +15,7 @@ pub struct ScanEntry { pub library_id:String,pub relative_path:String,pub title:
 impl Database {
     pub fn open(path: PathBuf) -> Result<Self, AppError> {
         let conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+        conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-20000;")?;
         conn.execute_batch(r#"
           CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY);
           CREATE TABLE IF NOT EXISTS libraries(
@@ -95,12 +95,26 @@ impl Database {
               INSERT OR IGNORE INTO schema_migrations(version) VALUES(4);
             "#)?;
         }
+        // Migration v5: persist folder paths so the sidebar tree is built from the
+        // index instead of walking the library on every snapshot.
+        let migrated: bool = conn.query_row("SELECT NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version>=5)", [], |r| r.get(0))?;
+        if migrated {
+            conn.execute_batch(r#"
+              CREATE TABLE IF NOT EXISTS library_folders(
+                library_id TEXT NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
+                relative_path TEXT NOT NULL,
+                PRIMARY KEY(library_id, relative_path)
+              );
+              INSERT OR IGNORE INTO schema_migrations(version) VALUES(5);
+            "#)?;
+        }
         Ok(Self { conn: Arc::new(Mutex::new(conn)) })
     }
 
     pub fn snapshot(&self) -> Result<AppSnapshot, AppError> {
+        let documents = self.documents()?;
         Ok(AppSnapshot {
-            libraries: self.libraries()?, documents: self.documents()?, tree: self.tree()?,
+            libraries: self.libraries()?, tree: self.tree_from(&documents)?, documents,
             groups: self.groups()?, materials: self.materials()?, settings: self.settings()?, session: self.session()?,
         })
     }
@@ -153,6 +167,7 @@ impl Database {
         for table in ["chapters","annotations","reading_progress","history","group_documents","materials","document_tags"]{
             tx.execute(&format!("DELETE FROM {} WHERE document_id IN (SELECT id FROM documents WHERE library_id=?1)",table),[id])?;
         }
+        tx.execute("DELETE FROM library_folders WHERE library_id=?1",[id])?;
         tx.execute("DELETE FROM documents WHERE library_id=?1",[id])?;
         tx.execute("DELETE FROM libraries WHERE id=?1",[id])?;
         tx.commit()?;Ok(())
@@ -168,15 +183,42 @@ impl Database {
         Ok(())
     }
 
+    pub fn document_mtimes(&self, library_id:&str) -> Result<HashMap<String,i64>,AppError> {
+        let conn=self.conn.lock();
+        let mut stmt=conn.prepare("SELECT relative_path,modified_at FROM documents WHERE library_id=?1")?;
+        let rows=stmt.query_map([library_id],|r|Ok((r.get(0)?,r.get(1)?)))?.collect::<Result<Vec<_>,_>>()?;
+        Ok(rows.into_iter().collect())
+    }
+
+    pub fn replace_library_folders(&self, library_id:&str, folders:&[String]) -> Result<(),AppError> {
+        let conn=self.conn.lock();
+        let tx=conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM library_folders WHERE library_id=?1",[library_id])?;
+        for path in folders {
+            tx.execute("INSERT OR IGNORE INTO library_folders(library_id,relative_path) VALUES(?1,?2)",params![library_id,path])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn library_folders(&self) -> Result<HashMap<String,Vec<String>>,AppError> {
+        let conn=self.conn.lock();
+        let mut stmt=conn.prepare("SELECT library_id,relative_path FROM library_folders")?;
+        let mut map:HashMap<String,Vec<String>>=HashMap::new();
+        for row in stmt.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))? {
+            let (library_id,path)=row?;
+            map.entry(library_id).or_default().push(path);
+        }
+        Ok(map)
+    }
+
     pub fn upsert_documents(&self, entries:&[ScanEntry]) -> Result<(),AppError> {
+        if entries.is_empty(){return Ok(());}
         let conn = self.conn.lock();
         let tx = conn.unchecked_transaction()?;
         for e in entries {
-            let existing: Option<String> = tx.query_row("SELECT id FROM documents WHERE library_id=?1 AND relative_path=?2",
-                params![e.library_id,e.relative_path], |r| r.get(0)).optional()?;
-            let id = existing.unwrap_or_else(||Uuid::new_v4().to_string());
-            // Lazy indexing: digest fields (hash/encoding/word count) are filled in on first read
-            // and only updated by read/write — never overwritten by a directory rescan.
+            // New rows get a fresh id; ON CONFLICT keeps the existing id and digest fields.
+            let id = Uuid::new_v4().to_string();
             tx.execute(r#"INSERT INTO documents(id,library_id,relative_path,title,format,word_count,modified_at,content_hash,encoding,newline,gender,genre,subgenre,length_kind,missing)
               VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,0)
               ON CONFLICT(library_id,relative_path) DO UPDATE SET title=excluded.title,format=excluded.format,modified_at=excluded.modified_at,missing=0"#,
@@ -191,17 +233,24 @@ impl Database {
     }
 
     pub fn update_missing_flags(&self, library_id:&str, seen:&[String]) -> Result<(),AppError>{
-        let conn=self.conn.lock();let tx=conn.unchecked_transaction()?;
-        tx.execute("UPDATE documents SET missing=1 WHERE library_id=?1",[library_id])?;
-        for chunk in seen.chunks(500){
-            let placeholders=vec!["?";chunk.len()].join(",");
-            tx.execute(&format!("UPDATE documents SET missing=0 WHERE library_id=?1 AND relative_path IN ({})",placeholders),rusqlite::params_from_iter(std::iter::once(library_id).chain(chunk.iter().map(|s|s.as_str()))))?;
+        let seen_set:HashSet<&str>=seen.iter().map(String::as_str).collect();
+        let conn=self.conn.lock();
+        let mut stmt=conn.prepare("SELECT relative_path,missing FROM documents WHERE library_id=?1")?;
+        let rows:Vec<(String,bool)>=stmt.query_map([library_id],|r|Ok((r.get(0)?,r.get::<_,i64>(1)?!=0)))?.collect::<Result<_,_>>()?;
+        drop(stmt);
+        let tx=conn.unchecked_transaction()?;
+        for(path,missing)in rows{
+            let should_missing=!seen_set.contains(path.as_str());
+            if missing!=should_missing{
+                tx.execute("UPDATE documents SET missing=?3 WHERE library_id=?1 AND relative_path=?2",params![library_id,path,i64::from(should_missing)])?;
+            }
         }
         tx.commit()?;Ok(())
     }
 
     pub fn documents(&self) -> Result<Vec<DocumentSummary>,AppError> {
-        let conn=self.conn.lock(); let mut stmt=conn.prepare("SELECT id,library_id,relative_path,title,format,word_count,modified_at,gender,genre,subgenre,length_kind,purpose,progress,shelf,missing,(SELECT COALESCE(json_group_array(tag),'[]') FROM document_tags WHERE document_id=documents.id),COALESCE((SELECT char_offset FROM reading_progress WHERE document_id=documents.id),0) FROM documents ORDER BY relative_path COLLATE NOCASE")?;
+        let conn=self.conn.lock();
+        let mut stmt=conn.prepare("SELECT d.id,d.library_id,d.relative_path,d.title,d.format,d.word_count,d.modified_at,d.gender,d.genre,d.subgenre,d.length_kind,d.purpose,d.progress,d.shelf,d.missing,COALESCE(t.tags,'[]'),COALESCE(p.char_offset,0) FROM documents d LEFT JOIN (SELECT document_id,json_group_array(tag) AS tags FROM document_tags GROUP BY document_id) t ON t.document_id=d.id LEFT JOIN reading_progress p ON p.document_id=d.id ORDER BY d.relative_path COLLATE NOCASE")?;
         let rows = stmt.query_map([], row_document)?.collect::<Result<_,_>>()?;
         Ok(rows)
     }
@@ -280,48 +329,64 @@ impl Database {
     pub fn history_path(&self,id:&str,doc:&str)->Result<PathBuf,AppError>{self.conn.lock().query_row("SELECT file_path FROM history WHERE id=?1 AND document_id=?2",params![id,doc],|r|r.get::<_,String>(0)).optional()?.map(PathBuf::from).ok_or(AppError::NotFound)}
     pub fn prune_history(&self,doc:&str)->Result<Vec<PathBuf>,AppError>{let cutoff=now()-30*86400;let conn=self.conn.lock();let mut s=conn.prepare("SELECT id,file_path FROM history WHERE document_id=?1 AND (created_at<?2 OR id NOT IN(SELECT id FROM history WHERE document_id=?1 ORDER BY created_at DESC LIMIT 20))")?;let old=s.query_map(params![doc,cutoff],|r|Ok((r.get::<_,String>(0)?,PathBuf::from(r.get::<_,String>(1)?))))?.collect::<Result<Vec<_>,_>>()?;for(id,_)in&old{conn.execute("DELETE FROM history WHERE id=?1",[id])?;}Ok(old.into_iter().map(|x|x.1).collect())}
 
-    fn tree(&self)->Result<Vec<TreeNode>,AppError>{
-        let docs=self.documents()?;
-        let doc_by_key:HashMap<(String,String),String>=docs.iter().map(|d|((d.library_id.clone(),d.relative_path.clone()),d.id.clone())).collect();
+    fn tree(&self)->Result<Vec<TreeNode>,AppError>{self.tree_from(&self.documents()?)}
+    fn tree_from(&self,docs:&[DocumentSummary])->Result<Vec<TreeNode>,AppError>{
+        let folders=self.library_folders()?;
         let libs=self.library_paths()?;
-        let mut roots=Vec::new();
-        for(lib_id,root_path,lib_name)in libs{
-            let mut root=TreeNode{name:lib_name,relative_path:String::new(),kind:"library".into(),library_id:lib_id.clone(),document_id:None,count:0,children:Vec::new()};
-            build_tree(&mut root,&root_path,&root_path,&lib_id,&doc_by_key);
-            roots.push(root);
-        }
-        Ok(roots)
+        Ok(build_tree_from_index(docs,&libs,&folders))
     }
 }
 
 fn row_document(r:&rusqlite::Row<'_>)->rusqlite::Result<DocumentSummary>{Ok(DocumentSummary{id:r.get(0)?,library_id:r.get(1)?,relative_path:r.get(2)?,title:r.get(3)?,format:r.get(4)?,word_count:r.get(5)?,modified_at:r.get(6)?,gender:r.get(7)?,genre:r.get(8)?,subgenre:r.get(9)?,length_kind:r.get(10)?,purpose:r.get(11)?,progress:r.get(12)?,shelf:r.get(13)?,missing:r.get::<_,i64>(14)?!=0,tags:serde_json::from_str(&r.get::<_,String>(15)?).unwrap_or_default(),read_offset:r.get(16)?})}
-fn build_tree(node:&mut TreeNode,root:&Path,dir:&Path,library_id:&str,doc_by_key:&HashMap<(String,String),String>){
-    let Ok(entries)=fs::read_dir(dir)else{return;};
-    let mut entries:Vec<_>=entries.flatten().collect();
-    // 文件夹排最上，再按名称排序
-    entries.sort_by(|a,b|{
-        let ak=a.file_type().map(|t|t.is_dir()).unwrap_or(false);
-        let bk=b.file_type().map(|t|t.is_dir()).unwrap_or(false);
-        bk.cmp(&ak).then_with(||a.file_name().to_string_lossy().to_lowercase().cmp(&b.file_name().to_string_lossy().to_lowercase()))
-    });
-    for entry in entries{
-        let path=entry.path();
-        let name=entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.')||name=="__MACOSX"||name=="node_modules"{continue;}
-        let ft=match entry.file_type(){Ok(t)=>t,Err(_)=>continue};
-        let relative=path.strip_prefix(root).map(|p|p.to_string_lossy().replace('\\',"/")).unwrap_or_default();
-        if ft.is_dir(){
-            let mut child=TreeNode{name,relative_path:relative,kind:"folder".into(),library_id:library_id.into(),document_id:None,count:0,children:Vec::new()};
-            build_tree(&mut child,root,&path,library_id,doc_by_key);
-            node.children.push(child);
-        }else if ft.is_file(){
-            let ext=path.extension().and_then(|s|s.to_str()).unwrap_or("").to_lowercase();
-            // 与扫描规则一致：md 仅收录「正文.md」
-            if ext!="txt"&&ext!="epub"{if !(ext=="md"&&path.file_stem().and_then(|s|s.to_str()).unwrap_or("")=="正文"){continue;}}
-            let id=doc_by_key.get(&(library_id.to_string(),relative.clone())).cloned();
-            node.children.push(TreeNode{name,relative_path:relative,kind:"document".into(),library_id:library_id.into(),document_id:id,count:0,children:Vec::new()});
+fn listed_document(doc:&DocumentSummary)->bool{
+    if doc.missing{return false;}
+    let name=doc.relative_path.rsplit('/').next().unwrap_or("");
+    if name=="正文.md"{return true;}
+    matches!(Path::new(name).extension().and_then(|s|s.to_str()).unwrap_or("").to_ascii_lowercase().as_str(),"txt"|"epub")
+}
+fn build_tree_from_index(docs:&[DocumentSummary],libs:&[(String,PathBuf,String)],folders:&HashMap<String,Vec<String>>)->Vec<TreeNode>{
+    libs.iter().map(|(lib_id,_,lib_name)|{
+        let mut root=TreeNode{name:lib_name.clone(),relative_path:String::new(),kind:"library".into(),library_id:lib_id.clone(),document_id:None,count:0,children:Vec::new()};
+        if let Some(paths)=folders.get(lib_id){
+            for path in paths{ensure_folder(&mut root,lib_id,path);}
         }
+        for doc in docs.iter().filter(|d|&d.library_id==lib_id&&listed_document(d)){
+            let parent=doc.relative_path.rsplit_once('/').map(|(p,_)|p).unwrap_or("");
+            let name=doc.relative_path.rsplit('/').next().unwrap_or(&doc.relative_path).to_string();
+            let folder=ensure_folder(&mut root,lib_id,parent);
+            if !folder.children.iter().any(|c|c.kind=="document"&&c.relative_path==doc.relative_path){
+                folder.children.push(TreeNode{name,relative_path:doc.relative_path.clone(),kind:"document".into(),library_id:lib_id.clone(),document_id:Some(doc.id.clone()),count:0,children:Vec::new()});
+            }
+        }
+        sort_and_count(&mut root);
+        root
+    }).collect()
+}
+fn ensure_folder<'a>(root:&'a mut TreeNode,library_id:&str,relative:&str)->&'a mut TreeNode{
+    if relative.is_empty(){return root;}
+    let mut current=root;
+    let mut acc=String::new();
+    for name in relative.split('/'){
+        if name.is_empty()||name.starts_with('.')||name=="__MACOSX"||name=="node_modules"{continue;}
+        if !acc.is_empty(){acc.push('/');}
+        acc.push_str(name);
+        let idx=current.children.iter().position(|child|child.kind=="folder"&&child.name==name);
+        current=if let Some(idx)=idx{
+            &mut current.children[idx]
+        }else{
+            current.children.push(TreeNode{name:name.into(),relative_path:acc.clone(),kind:"folder".into(),library_id:library_id.into(),document_id:None,count:0,children:Vec::new()});
+            current.children.last_mut().unwrap()
+        };
     }
+    current
+}
+fn sort_and_count(node:&mut TreeNode){
+    for child in &mut node.children{
+        if child.kind=="folder"{sort_and_count(child);}
+    }
+    node.children.sort_by(|a,b|{
+        (b.kind=="folder").cmp(&(a.kind=="folder")).then_with(||a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
     let direct=node.children.iter().filter(|c|c.kind=="document").count();
     let sub:usize=node.children.iter().filter(|c|c.kind=="folder").map(|c|c.count as usize).sum();
     node.count=(direct+sub)as i64;
@@ -388,19 +453,12 @@ mod tests {
     #[test]
     fn tree_includes_empty_folders_and_counts(){
         let db=Database::open(":memory:".into()).unwrap();
-        let tmp=std::env::temp_dir().join(format!("novalyte-tree-test-{}",Uuid::new_v4()));
-        fs::create_dir_all(tmp.join("a/empty")).unwrap();
-        fs::create_dir_all(tmp.join("b")).unwrap();
-        fs::write(tmp.join("a/x.txt"),"hi").unwrap();
-        fs::write(tmp.join("b/y.txt"),"hi").unwrap();
-        fs::write(tmp.join("b/ignore.txt"),"hi").unwrap();
-        fs::write(tmp.join("b/.h.txt"),"hi").unwrap();
-        let root=tmp.canonicalize().unwrap();
-        db.conn.lock().execute("INSERT INTO libraries(id,root_path,name,created_at) VALUES('l1',?1,'t',1)",[root.to_string_lossy().to_string()]).unwrap();
+        db.conn.lock().execute("INSERT INTO libraries(id,root_path,name,created_at) VALUES('l1','/tmp/x','t',1)",[]).unwrap();
         db.upsert_documents(&[entry("a/x.txt",1),entry("b/y.txt",1)]).unwrap();
+        db.replace_library_folders("l1",&["a".into(),"a/empty".into(),"b".into()]).unwrap();
         let tree=db.tree().unwrap();
         let lib=&tree[0];
-        assert_eq!(lib.count,3);
+        assert_eq!(lib.count,2);
         let a=lib.children.iter().find(|c|c.name=="a").unwrap();
         assert_eq!(a.count,1);
         assert!(a.children.iter().find(|c|c.name=="x.txt").unwrap().document_id.is_some());
@@ -410,21 +468,15 @@ mod tests {
         assert!(empty.children.is_empty());
 
         // 「正文.md」进入目录树，其他 md（设定.md 等）不显示
-        fs::write(tmp.join("b/正文.md"),"hi").unwrap();
-        fs::write(tmp.join("b/设定.md"),"hi").unwrap();
         db.upsert_documents(&[entry("b/正文.md",1),entry("b/设定.md",1)]).unwrap();
         let lib=&db.tree().unwrap()[0];
+        let a=lib.children.iter().find(|c|c.name=="a").unwrap();
         let b=lib.children.iter().find(|c|c.name=="b").unwrap();
         assert!(b.children.iter().any(|c|c.name=="正文.md"&&c.document_id.is_some()));
         assert!(b.children.iter().all(|c|c.name!="设定.md"));
-        // 文件夹排在文件前面
         assert_eq!(a.children[0].name,"empty");
         assert_eq!(a.children[0].kind,"folder");
-        let b=lib.children.iter().find(|c|c.name=="b").unwrap();
-        assert_eq!(b.count,3); // y.txt + ignore.txt + 正文.md
-        // 隐藏文件被跳过（ignore.txt 是合法 txt，应计入）
-        assert!(b.children.iter().all(|c|c.name!=".h.txt"));
-        let _=fs::remove_dir_all(&tmp);
+        assert_eq!(b.count,2);
     }
 
     #[test]

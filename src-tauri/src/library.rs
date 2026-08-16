@@ -56,7 +56,33 @@ pub fn restore_access(state:&Arc<AppState>){
     }
 }
 pub fn refresh_all(state:&Arc<AppState>)->Result<(),AppError>{for(id,root,_)in state.db.library_paths()?{scan(state,&id,&root)?;}Ok(())}
-fn scan(state:&Arc<AppState>,library_id:&str,root:&Path)->Result<(),AppError>{let mut entries:Vec<ScanEntry>=Vec::new();let mut seen:Vec<String>=Vec::new();for entry in WalkDir::new(root).follow_links(false).into_iter().filter_entry(|e|!hidden(e.path(),root)){let e=match entry{Ok(e)=>e,Err(_)=>continue};if !e.file_type().is_file(){continue;}let ext=e.path().extension().and_then(|s|s.to_str()).unwrap_or("").to_lowercase();if ext!="txt"&&ext!="epub"{if !(ext=="md"&&e.path().file_stem().and_then(|s|s.to_str()).unwrap_or("")=="正文"){continue;}}let relative=e.path().strip_prefix(root).map_err(|_|AppError::PathOutsideLibrary)?.to_string_lossy().replace('\\',"/");let title=e.path().file_stem().and_then(|s|s.to_str()).unwrap_or("未命名").to_string();let modified=fs::metadata(e.path())?.modified().ok().and_then(|t|t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d|d.as_secs()as i64).unwrap_or(0);seen.push(relative.clone());let tax=taxonomy(root,&relative);entries.push(ScanEntry{library_id:library_id.into(),relative_path:relative,title,format:ext,word_count:0,modified_at:modified,hash:String::new(),encoding:"utf-8".into(),newline:"\n".into(),taxonomy:tax})}state.db.upsert_documents(&entries)?;state.db.update_missing_flags(library_id,&seen)?;Ok(())}
+fn scan(state:&Arc<AppState>,library_id:&str,root:&Path)->Result<(),AppError>{
+    let known=state.db.document_mtimes(library_id)?;
+    let mut entries:Vec<ScanEntry>=Vec::new();
+    let mut seen:Vec<String>=Vec::new();
+    let mut folders:Vec<String>=Vec::new();
+    for entry in WalkDir::new(root).follow_links(false).into_iter().filter_entry(|e|!hidden(e.path(),root)){
+        let e=match entry{Ok(e)=>e,Err(_)=>continue};
+        let relative=e.path().strip_prefix(root).map_err(|_|AppError::PathOutsideLibrary)?.to_string_lossy().replace('\\',"/");
+        if e.file_type().is_dir(){
+            if !relative.is_empty(){folders.push(relative);}
+            continue;
+        }
+        if !e.file_type().is_file(){continue;}
+        let ext=e.path().extension().and_then(|s|s.to_str()).unwrap_or("").to_lowercase();
+        if ext!="txt"&&ext!="epub"{if !(ext=="md"&&e.path().file_stem().and_then(|s|s.to_str()).unwrap_or("")=="正文"){continue;}}
+        let title=e.path().file_stem().and_then(|s|s.to_str()).unwrap_or("未命名").to_string();
+        let modified=fs::metadata(e.path())?.modified().ok().and_then(|t|t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d|d.as_secs()as i64).unwrap_or(0);
+        seen.push(relative.clone());
+        if known.get(&relative)==Some(&modified){continue;}
+        let tax=taxonomy(root,&relative);
+        entries.push(ScanEntry{library_id:library_id.into(),relative_path:relative,title,format:ext,word_count:0,modified_at:modified,hash:String::new(),encoding:"utf-8".into(),newline:"\n".into(),taxonomy:tax});
+    }
+    state.db.upsert_documents(&entries)?;
+    state.db.update_missing_flags(library_id,&seen)?;
+    state.db.replace_library_folders(library_id,&folders)?;
+    Ok(())
+}
 fn hidden(path:&Path,root:&Path)->bool{if path==root{return false;}path.file_name().and_then(|s|s.to_str()).map_or(true,|s|s.starts_with('.')||s=="__MACOSX"||s=="node_modules")}
 fn taxonomy(root:&Path,relative:&str)->[String;3]{let mut parts:Vec<String>=relative.split('/').map(str::to_string).collect();parts.pop();let root_name=root.file_name().and_then(|s|s.to_str()).unwrap_or("");if root_name=="男频"||root_name=="女频"{parts.insert(0,root_name.into());}let gender_pos=parts.iter().position(|p|p=="男频"||p=="女频");if let Some(i)=gender_pos{[parts.get(i).cloned().unwrap_or_else(||"未分类".into()),parts.get(i+1).cloned().unwrap_or_else(||"未分类".into()),parts.get(i+2).cloned().unwrap_or_else(||"未分类".into())]}else{["未分类".into(),parts.first().cloned().unwrap_or_else(||"未分类".into()),parts.get(1).cloned().unwrap_or_else(||"未分类".into())]}}
 

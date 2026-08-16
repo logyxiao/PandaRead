@@ -20,8 +20,24 @@ pub struct AppState {
     db: Database,
     watchers: Mutex<Vec<LibraryWatcher>>,
     scoped_access: Mutex<Vec<macos_access::ScopedAccess>>,
+    content_cache: Mutex<Vec<(String, i64, DocumentContent)>>,
     data_dir: PathBuf,
     initial_scan_started: AtomicBool,
+}
+
+impl AppState {
+    pub fn cached_read(&self, id: &str, mtime: i64) -> Option<DocumentContent> {
+        self.content_cache.lock().iter().find(|(cached_id, cached_mtime, _)| cached_id == id && *cached_mtime == mtime).map(|(_, _, content)| content.clone())
+    }
+    pub fn remember_read(&self, id: String, mtime: i64, content: DocumentContent) {
+        let mut cache = self.content_cache.lock();
+        cache.retain(|(cached_id, _, _)| cached_id != &id);
+        cache.push((id, mtime, content));
+        if cache.len() > 4 { cache.remove(0); }
+    }
+    pub fn forget_read(&self, id: &str) {
+        self.content_cache.lock().retain(|(cached_id, _, _)| cached_id != id);
+    }
 }
 
 type SharedState = Arc<AppState>;
@@ -41,8 +57,9 @@ fn bootstrap(app: tauri::AppHandle, state: State<'_, SharedState>) -> Result<App
 }
 
 #[tauri::command]
-fn app_snapshot(state: State<'_, SharedState>) -> Result<AppSnapshot, AppError> {
-    state.db.snapshot()
+async fn app_snapshot(state: State<'_, SharedState>) -> Result<AppSnapshot, AppError> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || state.db.snapshot()).await.map_err(|error| AppError::Message(error.to_string()))?
 }
 
 #[tauri::command]
@@ -76,7 +93,9 @@ async fn library_refresh(state: State<'_, SharedState>) -> Result<AppSnapshot, A
 
 #[tauri::command]
 async fn document_read(state: State<'_, SharedState>, remote: State<'_, Arc<RemoteManager>>, document_id: String) -> Result<DocumentContent, AppError> {
-    let content = documents::read(&state, &document_id)?;
+    let state = state.inner().clone();
+    let id = document_id.clone();
+    let content = tauri::async_runtime::spawn_blocking(move || documents::read(&state, &id)).await.map_err(|error| AppError::Message(error.to_string()))??;
     // 双向跟随：桌面切换文稿时推送给所有已连接的手机
     remote.broadcast_desktop_open(&document_id, &content.summary.title);
     Ok(content)
@@ -84,12 +103,14 @@ async fn document_read(state: State<'_, SharedState>, remote: State<'_, Arc<Remo
 
 #[tauri::command]
 async fn document_write(state: State<'_, SharedState>, input: WriteDocumentInput) -> Result<DocumentContent, AppError> {
-    documents::write(&state, input)
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || documents::write(&state, input)).await.map_err(|error| AppError::Message(error.to_string()))?
 }
 
 #[tauri::command]
 async fn document_force_write(state: State<'_, SharedState>, input: WriteDocumentInput) -> Result<DocumentContent, AppError> {
-    documents::force_write(&state, input)
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || documents::force_write(&state, input)).await.map_err(|error| AppError::Message(error.to_string()))?
 }
 
 #[tauri::command]
@@ -284,6 +305,7 @@ pub fn run() {
                 db: Database::open(data_dir.join("novalyte.sqlite3")).map_err(|e| e.to_string())?,
                 watchers: Mutex::new(Vec::new()),
                 scoped_access: Mutex::new(Vec::new()),
+                content_cache: Mutex::new(Vec::new()),
                 data_dir,
                 initial_scan_started: AtomicBool::new(false),
             });
