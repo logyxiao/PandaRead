@@ -14,22 +14,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # universal-apple-darwin target 已被 Rust 官方移除，改为双架构各出 dmg
+          # macOS 使用 universal fat binary，避免 Apple Silicon 上的 thin linker
+          # 签名被 macOS 误判为资源目录损坏；Rust 会分别构建两个架构后合并。
           - platform: macos-latest
-            name: macos-arm64
-            args: --target aarch64-apple-darwin
-            rust_target: aarch64-apple-darwin
-          - platform: macos-latest
-            name: macos-x64
-            args: --target x86_64-apple-darwin
-            rust_target: x86_64-apple-darwin
+            name: macos-universal
+            args: --target universal-apple-darwin
+            rust_target: aarch64-apple-darwin,x86_64-apple-darwin
           - platform: windows-latest
             name: windows-x64
             args: --bundles nsis
             rust_target: ''
     runs-on: ${{ matrix.platform }}
-    env:
-      HAS_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -53,27 +48,8 @@ jobs:
       - name: Generate Tauri icons
         run: npm run tauri -- icon src-tauri/icons/icon.png --output src-tauri/icons
 
-      # Tauri treats an empty APPLE_CERTIFICATE environment variable as a
-      # certificate to import, so unsigned builds must not receive it at all.
-      - name: Build unsigned installers
-        if: runner.os != 'macOS' || env.HAS_APPLE_CERTIFICATE != 'true'
-        uses: tauri-apps/tauri-action@v1
+      - name: Configure optional signing environment
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          # 仅推送 v* tag 时创建 draft release；push main / 手动触发时留空，只构建
-          tagName: ${{ startsWith(github.ref, 'refs/tags/v') && 'v__VERSION__' || '' }}
-          releaseName: Novalyte v__VERSION__
-          releaseBody: See the assets to download this version and install.
-          releaseDraft: true
-          prerelease: false
-          args: ${{ matrix.args }}
-
-      - name: Build signed macOS installers
-        if: runner.os == 'macOS' && env.HAS_APPLE_CERTIFICATE == 'true'
-        uses: tauri-apps/tauri-action@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -82,6 +58,22 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then exit 0; fi
+          echo "APPLE_CERTIFICATE=$APPLE_CERTIFICATE" >> "$GITHUB_ENV"
+          echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD" >> "$GITHUB_ENV"
+          echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+          echo "APPLE_TEAM_ID=$APPLE_TEAM_ID" >> "$GITHUB_ENV"
+          echo "APPLE_ID=$APPLE_ID" >> "$GITHUB_ENV"
+          echo "APPLE_PASSWORD=$APPLE_PASSWORD" >> "$GITHUB_ENV"
+          echo "TAURI_SIGNING_PRIVATE_KEY=$TAURI_SIGNING_PRIVATE_KEY" >> "$GITHUB_ENV"
+          echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" >> "$GITHUB_ENV"
+
+      - name: Build installers
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           # 仅推送 v* tag 时创建 draft release；push main / 手动触发时留空，只构建
           tagName: ${{ startsWith(github.ref, 'refs/tags/v') && 'v__VERSION__' || '' }}
@@ -95,6 +87,5 @@ jobs:
         with:
           name: installer-${{ matrix.name }}
           path: |
-            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
-            src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
