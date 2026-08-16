@@ -86,6 +86,15 @@ impl Database {
               INSERT OR IGNORE INTO schema_migrations(version) VALUES(3);
             "#)?;
         }
+        // Migration v4: persist macOS security-scoped bookmarks so a library
+        // chosen once keeps folder access after relaunch.
+        let migrated: bool = conn.query_row("SELECT NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version>=4)", [], |r| r.get(0))?;
+        if migrated {
+            conn.execute_batch(r#"
+              ALTER TABLE libraries ADD COLUMN bookmark BLOB;
+              INSERT OR IGNORE INTO schema_migrations(version) VALUES(4);
+            "#)?;
+        }
         Ok(Self { conn: Arc::new(Mutex::new(conn)) })
     }
 
@@ -110,15 +119,32 @@ impl Database {
         Ok(rows)
     }
 
-    pub fn add_library(&self, root: &Path, name: &str) -> Result<String, AppError> {
+    pub fn add_library_with_bookmark(&self, root: &Path, name: &str, bookmark: Option<&[u8]>) -> Result<String, AppError> {
         let root = root.canonicalize().map_err(|_| AppError::NotFound)?;
         if !root.is_dir() { return Err(AppError::NotFound); }
         let text = root.to_string_lossy();
         let conn = self.conn.lock();
-        if let Some(id) = conn.query_row("SELECT id FROM libraries WHERE root_path=?1", [text.as_ref()], |r| r.get(0)).optional()? { return Ok(id); }
+        if let Some(id) = conn.query_row("SELECT id FROM libraries WHERE root_path=?1", [text.as_ref()], |r| r.get(0)).optional()? {
+            if let Some(bytes) = bookmark {
+                conn.execute("UPDATE libraries SET bookmark=?1 WHERE id=?2", params![bytes, id])?;
+            }
+            return Ok(id);
+        }
         let id = Uuid::new_v4().to_string();
-        conn.execute("INSERT INTO libraries(id,root_path,name,created_at) VALUES(?1,?2,?3,?4)", params![id,text.as_ref(),name,now()])?;
+        conn.execute("INSERT INTO libraries(id,root_path,name,created_at,bookmark) VALUES(?1,?2,?3,?4,?5)", params![id,text.as_ref(),name,now(),bookmark])?;
         Ok(id)
+    }
+
+    pub fn library_bookmarks(&self) -> Result<Vec<(String, PathBuf, Option<Vec<u8>>)>, AppError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT id,root_path,bookmark FROM libraries ORDER BY created_at")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, PathBuf::from(r.get::<_,String>(1)?), r.get(2)?)))?.collect::<Result<_,_>>()?;
+        Ok(rows)
+    }
+
+    pub fn set_library_bookmark(&self, id: &str, bookmark: &[u8]) -> Result<(), AppError> {
+        self.conn.lock().execute("UPDATE libraries SET bookmark=?1 WHERE id=?2", params![bookmark, id])?;
+        Ok(())
     }
 
     pub fn remove_library(&self, id: &str) -> Result<(), AppError> {

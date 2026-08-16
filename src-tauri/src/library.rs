@@ -1,4 +1,4 @@
-use crate::{database::ScanEntry,documents::safe_path,models::*,AppState};
+use crate::{database::ScanEntry,documents::safe_path,macos_access,models::*,AppState};
 use notify::{RecommendedWatcher,RecursiveMode,Watcher};
 use sha2::{Digest,Sha256};
 use std::{fs,path::{Path,PathBuf},sync::{Arc,atomic::{AtomicBool,Ordering}},time::Duration};
@@ -21,7 +21,39 @@ pub fn add(state:&Arc<AppState>,path:&str)->Result<(),AppError>{
         }
     }
     let name=root.file_name().and_then(|s|s.to_str()).unwrap_or("本地书库");
-    let id=state.db.add_library(&root,name)?;scan(state,&id,&root)
+    let bookmark=macos_access::bookmark_for_path(&canonical);
+    if let Some(access)=bookmark.as_deref().and_then(macos_access::start_access).map(|(_,access,_)|access).or_else(||macos_access::start_path(&canonical)){
+        state.scoped_access.lock().push(access);
+    }
+    let id=state.db.add_library_with_bookmark(&root,name,bookmark.as_deref())?;scan(state,&id,&root)
+}
+
+pub fn restore_access(state:&Arc<AppState>){
+    let Ok(rows)=state.db.library_bookmarks() else {return};
+    let mut held=state.scoped_access.lock();
+    for(id,root,bookmark)in rows{
+        if let Some(bytes)=bookmark.as_deref(){
+            if let Some((resolved,access,stale))=macos_access::start_access(bytes){
+                if stale{
+                    if let Some(fresh)=macos_access::bookmark_for_path(&resolved){
+                        let _=state.db.set_library_bookmark(&id,&fresh);
+                    }
+                }
+                held.push(access);
+                continue;
+            }
+        }
+        if let Some(fresh)=macos_access::bookmark_for_path(&root){
+            if let Some((_,access,_))=macos_access::start_access(&fresh){
+                let _=state.db.set_library_bookmark(&id,&fresh);
+                held.push(access);
+                continue;
+            }
+        }
+        if let Some(access)=macos_access::start_path(&root){
+            held.push(access);
+        }
+    }
 }
 pub fn refresh_all(state:&Arc<AppState>)->Result<(),AppError>{for(id,root,_)in state.db.library_paths()?{scan(state,&id,&root)?;}Ok(())}
 fn scan(state:&Arc<AppState>,library_id:&str,root:&Path)->Result<(),AppError>{let mut entries:Vec<ScanEntry>=Vec::new();let mut seen:Vec<String>=Vec::new();for entry in WalkDir::new(root).follow_links(false).into_iter().filter_entry(|e|!hidden(e.path(),root)){let e=match entry{Ok(e)=>e,Err(_)=>continue};if !e.file_type().is_file(){continue;}let ext=e.path().extension().and_then(|s|s.to_str()).unwrap_or("").to_lowercase();if ext!="txt"&&ext!="epub"{if !(ext=="md"&&e.path().file_stem().and_then(|s|s.to_str()).unwrap_or("")=="正文"){continue;}}let relative=e.path().strip_prefix(root).map_err(|_|AppError::PathOutsideLibrary)?.to_string_lossy().replace('\\',"/");let title=e.path().file_stem().and_then(|s|s.to_str()).unwrap_or("未命名").to_string();let modified=fs::metadata(e.path())?.modified().ok().and_then(|t|t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d|d.as_secs()as i64).unwrap_or(0);seen.push(relative.clone());let tax=taxonomy(root,&relative);entries.push(ScanEntry{library_id:library_id.into(),relative_path:relative,title,format:ext,word_count:0,modified_at:modified,hash:String::new(),encoding:"utf-8".into(),newline:"\n".into(),taxonomy:tax})}state.db.upsert_documents(&entries)?;state.db.update_missing_flags(library_id,&seen)?;Ok(())}
@@ -70,6 +102,21 @@ pub fn create_entry(state:&Arc<AppState>,i:FileCreateInput)->Result<(),AppError>
 pub fn rename_entry(state:&Arc<AppState>,i:FileRenameInput)->Result<(),AppError>{let(_,root,_)=find_library(state,&i.library_id)?;let source=safe_path(&root,&i.relative_path)?;let name=clean_name(&i.new_name)?;let ext=source.extension().and_then(|s|s.to_str());let target_name=if source.is_file()&&Path::new(&name).extension().is_none(){format!("{}.{}",name,ext.unwrap_or("txt"))}else{name};let target=source.parent().ok_or(AppError::PathOutsideLibrary)?.join(target_name);if target.exists(){return Err(AppError::AlreadyExists);}fs::rename(source,target)?;scan(state,&i.library_id,&root)}
 pub fn move_entry(state:&Arc<AppState>,i:FileMoveInput)->Result<(),AppError>{let(_,src_root,_)=find_library(state,&i.source_library_id)?;let(_,dst_root,_)=find_library(state,&i.target_library_id)?;let source=safe_path(&src_root,&i.relative_path)?;let parent=if i.target_parent_path.is_empty(){dst_root.clone()}else{safe_path(&dst_root,&i.target_parent_path)?};let target=parent.join(source.file_name().ok_or(AppError::PathOutsideLibrary)?);if target.exists(){return Err(AppError::AlreadyExists);}let target_relative=target.strip_prefix(&dst_root).map_err(|_|AppError::PathOutsideLibrary)?.to_string_lossy().replace('\\',"/");if src_root==dst_root{fs::rename(&source,&target)?;}else{copy_verified(&source,&target)?;trash::delete(&source).map_err(|e|AppError::Message(e.to_string()))?;}state.db.relocate_documents(&i.source_library_id,&i.relative_path,&i.target_library_id,&target_relative)?;scan(state,&i.source_library_id,&src_root)?;if i.source_library_id!=i.target_library_id{scan(state,&i.target_library_id,&dst_root)?;}Ok(())}
 pub fn trash_entry(state:&Arc<AppState>,i:FileTargetInput)->Result<(),AppError>{let(_,root,_)=find_library(state,&i.library_id)?;let path=safe_path(&root,&i.relative_path)?;trash::delete(path).map_err(|e|AppError::Message(e.to_string()))?;scan(state,&i.library_id,&root)}
+pub fn reveal_entry(state:&Arc<AppState>,i:FileTargetInput)->Result<(),AppError>{
+    let(_,root,_)=find_library(state,&i.library_id)?;
+    let path=if i.relative_path.is_empty(){root}else{safe_path(&root,&i.relative_path)?};
+    if !path.exists(){return Err(AppError::NotFound);}
+    reveal_in_file_manager(&path)
+}
+fn reveal_in_file_manager(path:&Path)->Result<(),AppError>{
+    #[cfg(target_os="macos")]
+    {std::process::Command::new("open").arg("-R").arg(path).status().map_err(|e|AppError::Message(e.to_string()))?;}
+    #[cfg(target_os="windows")]
+    {std::process::Command::new("explorer").arg(format!("/select,{}",path.display())).status().map_err(|e|AppError::Message(e.to_string()))?;}
+    #[cfg(not(any(target_os="macos",target_os="windows")))]
+    {let dir=if path.is_dir(){path}else{path.parent().unwrap_or(path)};std::process::Command::new("xdg-open").arg(dir).status().map_err(|e|AppError::Message(e.to_string()))?;}
+    Ok(())
+}
 fn copy_verified(src:&Path,dst:&Path)->Result<(),AppError>{if src.is_dir(){fs::create_dir(dst)?;for e in fs::read_dir(src)?{let e=e?;copy_verified(&e.path(),&dst.join(e.file_name()))?;}}else{fs::copy(src,dst)?;let a=hash_file(src)?;let b=hash_file(dst)?;if a!=b{return Err(AppError::Message("跨书库复制校验失败，原文件未移动".into()));}}Ok(())}
 fn hash_file(path:&Path)->Result<Vec<u8>,AppError>{let bytes=fs::read(path)?;Ok(Sha256::digest(bytes).to_vec())}
 fn find_library(state:&Arc<AppState>,id:&str)->Result<(String,PathBuf,String),AppError>{state.db.library_paths()?.into_iter().find(|x|x.0==id).ok_or(AppError::NotFound)}

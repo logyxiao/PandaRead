@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>熊猫阅读需要访问「文稿」中的小说书库。你选择文件夹并允许一次后，之后打开应用不必再授权。</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>熊猫阅读需要访问「桌面」上的小说书库。你选择文件夹并允许一次后，之后打开应用不必再授权。</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>熊猫阅读需要访问「下载」中的小说书库。你选择文件夹并允许一次后，之后打开应用不必再授权。</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>熊猫阅读需要访问移动硬盘或 U 盘上的小说书库。允许一次后即可继续使用。</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>熊猫阅读需要访问网络位置上的小说书库。允许一次后即可继续使用。</string>
+</dict>
+</plist>

@@ -4,6 +4,7 @@ mod docx;
 mod documents;
 mod epub;
 mod library;
+mod macos_access;
 mod models;
 mod remote;
 
@@ -18,6 +19,7 @@ use tauri::{Emitter, Manager, State};
 pub struct AppState {
     db: Database,
     watchers: Mutex<Vec<LibraryWatcher>>,
+    scoped_access: Mutex<Vec<macos_access::ScopedAccess>>,
     data_dir: PathBuf,
     initial_scan_started: AtomicBool,
 }
@@ -129,6 +131,11 @@ fn document_move(state: State<'_, SharedState>, input: FileMoveInput) -> Result<
 fn document_trash(state: State<'_, SharedState>, input: FileTargetInput) -> Result<AppSnapshot, AppError> {
     library::trash_entry(&state, input)?;
     state.db.snapshot()
+}
+
+#[tauri::command]
+fn document_reveal(state: State<'_, SharedState>, input: FileTargetInput) -> Result<(), AppError> {
+    library::reveal_entry(&state, input)
 }
 
 #[tauri::command]
@@ -276,18 +283,20 @@ pub fn run() {
             let state = Arc::new(AppState {
                 db: Database::open(data_dir.join("novalyte.sqlite3")).map_err(|e| e.to_string())?,
                 watchers: Mutex::new(Vec::new()),
+                scoped_access: Mutex::new(Vec::new()),
                 data_dir,
                 initial_scan_started: AtomicBool::new(false),
             });
             app.manage(state.clone());
             app.manage(Arc::new(RemoteManager::new(app.handle().clone(), state.clone())));
+            library::restore_access(&state);
             library::start_watchers(&app.handle().clone(), &state).ok();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             bootstrap, app_snapshot, library_add, library_remove, library_refresh,
             document_read, document_write, document_force_write, document_save_as, document_tidy, document_create,
-            document_rename, document_move, document_trash, document_update_meta, document_shelf, document_previews,
+            document_rename, document_move, document_trash, document_reveal, document_update_meta, document_shelf, document_previews,
             chapter_create, chapter_update, chapter_delete,
             annotation_save, annotation_delete, material_save,
             document_tag_update,

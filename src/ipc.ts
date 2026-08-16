@@ -15,7 +15,7 @@ export const api = {
   write:(documentId:string,content:string,expectedHash:string)=>call<DocumentContent>("document_write",{input:{documentId,content,expectedHash}}),
   forceWrite:(documentId:string,content:string,expectedHash:string)=>call<DocumentContent>("document_force_write",{input:{documentId,content,expectedHash}}),
   saveAs:(documentId:string,content:string,targetPath:string)=>call<void>("document_save_as",{documentId,content,targetPath}),
-  create:(input:object)=>call<AppSnapshot>("document_create",{input}), rename:(input:object)=>call<AppSnapshot>("document_rename",{input}), move:(input:object)=>call<AppSnapshot>("document_move",{input}), trash:(input:object)=>call<AppSnapshot>("document_trash",{input}),
+  create:(input:object)=>call<AppSnapshot>("document_create",{input}), rename:(input:object)=>call<AppSnapshot>("document_rename",{input}), move:(input:object)=>call<AppSnapshot>("document_move",{input}), trash:(input:object)=>call<AppSnapshot>("document_trash",{input}), reveal:(input:object)=>call<void>("document_reveal",{input}),
   updateMeta:(input:object)=>call<AppSnapshot>("document_update_meta",{input}),
   shelfUpdate:(documentId:string,shelf:string)=>call<DocumentSummary>("document_shelf",{documentId,shelf}),
   documentPreviews:(ids:string[])=>call<{documentId:string;paragraphs:string[]}[]>("document_previews",{ids}),
