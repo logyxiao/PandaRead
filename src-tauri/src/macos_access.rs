@@ -24,15 +24,29 @@ pub fn start_path(_path: &Path) -> Option<ScopedAccess> {
     None
 }
 
+#[cfg(not(target_os = "macos"))]
+pub fn has_full_disk_access() -> bool {
+    true
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn open_full_disk_access_settings() -> std::io::Result<()> {
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 mod imp {
     use super::ScopedAccess;
     use objc2::rc::Retained;
     use objc2::runtime::Bool;
     use objc2_foundation::{
-        NSData, NSString, NSURL, NSURLBookmarkCreationOptions, NSURLBookmarkResolutionOptions,
+        NSData, NSString, NSURLBookmarkCreationOptions, NSURLBookmarkResolutionOptions, NSURL,
     };
-    use std::path::{Path, PathBuf};
+    use std::{
+        fs::File,
+        path::{Path, PathBuf},
+        process::Command,
+    };
 
     fn file_url(path: &Path) -> Option<Retained<NSURL>> {
         Some(NSURL::fileURLWithPath(&NSString::from_str(path.to_str()?)))
@@ -76,7 +90,31 @@ mod imp {
         }
         Some(ScopedAccess { _url: url })
     }
+
+    pub fn has_full_disk_access() -> bool {
+        let Some(user_home) = std::env::var_os("HOME") else {
+            return false;
+        };
+        File::open(
+            PathBuf::from(user_home).join("Library/Application Support/com.apple.TCC/TCC.db"),
+        )
+        .is_ok()
+    }
+
+    pub fn open_full_disk_access_settings() -> std::io::Result<()> {
+        let status = Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other("无法打开系统设置"))
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
-pub use imp::{bookmark_for_path, start_access, start_path};
+pub use imp::{
+    bookmark_for_path, has_full_disk_access, open_full_disk_access_settings, start_access,
+    start_path,
+};

@@ -20,9 +20,18 @@ fn escape_xml(text: &str) -> String {
 
 /// 去掉行内 Markdown 标记（**加粗**、*斜体*、`代码`、链接、图片），保留文字本身。
 fn clean_inline(text: &str) -> String {
-    let re = Regex::new(r"!\[([^\]]*)\]\([^)]*\)|\*\*([^*]+)\*\*|\*([^*]+)\*|`([^`]+)`|\[([^\]]+)\]\([^)]*\)").unwrap();
+    let re = Regex::new(
+        r"!\[([^\]]*)\]\([^)]*\)|\*\*([^*]+)\*\*|\*([^*]+)\*|`([^`]+)`|\[([^\]]+)\]\([^)]*\)",
+    )
+    .unwrap();
     re.replace_all(text.trim(), |caps: &regex::Captures| {
-        caps.get(2).or(caps.get(3)).or(caps.get(4)).or(caps.get(5)).or(caps.get(1)).map(|m| m.as_str().to_string()).unwrap_or_default()
+        caps.get(2)
+            .or(caps.get(3))
+            .or(caps.get(4))
+            .or(caps.get(5))
+            .or(caps.get(1))
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default()
     })
     .into_owned()
 }
@@ -51,7 +60,7 @@ fn to_chinese_num(n: u32) -> String {
             out.push_str(D[tens as usize]);
         }
         out.push('十');
-        if rest % 10 != 0 {
+        if !rest.is_multiple_of(10) {
             out.push_str(D[(rest % 10) as usize]);
         }
     } else if rest > 0 {
@@ -167,8 +176,10 @@ fn build_docx(document_xml: &str) -> Result<Vec<u8>, AppError> {
     let mut zip = ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let opts = SimpleFileOptions::default();
     let mut put = |name: &str, data: &str| -> Result<(), AppError> {
-        zip.start_file(name, opts).map_err(|e| AppError::Message(format!("写入 docx 失败：{e}")))?;
-        zip.write_all(data.as_bytes()).map_err(|e| AppError::Message(format!("写入 docx 失败：{e}")))?;
+        zip.start_file(name, opts)
+            .map_err(|e| AppError::Message(format!("写入 docx 失败：{e}")))?;
+        zip.write_all(data.as_bytes())
+            .map_err(|e| AppError::Message(format!("写入 docx 失败：{e}")))?;
         Ok(())
     };
     put("[Content_Types].xml", content_types)?;
@@ -176,7 +187,9 @@ fn build_docx(document_xml: &str) -> Result<Vec<u8>, AppError> {
     put("word/_rels/document.xml.rels", doc_rels)?;
     put("word/document.xml", &document)?;
     put("word/styles.xml", styles)?;
-    let cursor = zip.finish().map_err(|e| AppError::Message(format!("生成 docx 失败：{e}")))?;
+    let cursor = zip
+        .finish()
+        .map_err(|e| AppError::Message(format!("生成 docx 失败：{e}")))?;
     Ok(cursor.into_inner())
 }
 
@@ -184,7 +197,10 @@ fn build_docx(document_xml: &str) -> Result<Vec<u8>, AppError> {
 fn resolve_title(relative: &str) -> String {
     let parts: Vec<&str> = relative.split('/').collect();
     let file_name = parts.last().copied().unwrap_or("");
-    let base = file_name.rsplit_once('.').map(|(s, _)| s).unwrap_or(file_name);
+    let base = file_name
+        .rsplit_once('.')
+        .map(|(s, _)| s)
+        .unwrap_or(file_name);
     let is_zhengwen = base == "正文" && (file_name.ends_with(".md") || file_name.ends_with(".txt"));
     if is_zhengwen && parts.len() >= 2 {
         parts[parts.len() - 2].to_string()
@@ -200,7 +216,11 @@ pub fn export(state: &Arc<AppState>, document_id: &str) -> Result<String, AppErr
     let relative = &stored.summary.relative_path;
     let title = resolve_title(relative);
     let parts: Vec<&str> = relative.split('/').collect();
-    let parent = if parts.len() > 1 { parts[..parts.len() - 1].join("/") } else { String::new() };
+    let parent = if parts.len() > 1 {
+        parts[..parts.len() - 1].join("/")
+    } else {
+        String::new()
+    };
     let dir = if parent.is_empty() {
         stored.root_path.clone()
     } else {
@@ -216,7 +236,8 @@ pub fn export(state: &Arc<AppState>, document_id: &str) -> Result<String, AppErr
         body.push_str(&para_xml(para));
     }
     let bytes = build_docx(&body)?;
-    std::fs::write(&output, &bytes).map_err(|e| AppError::Message(format!("保存 Word 文档失败：{e}")))?;
+    std::fs::write(&output, &bytes)
+        .map_err(|e| AppError::Message(format!("保存 Word 文档失败：{e}")))?;
     Ok(output.to_string_lossy().into_owned())
 }
 

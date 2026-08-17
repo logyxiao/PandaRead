@@ -6,6 +6,8 @@ export const isTauri = Boolean(window.__TAURI_INTERNALS__);
 export async function call<T>(command:string,args?:Record<string,unknown>):Promise<T>{if(!isTauri) throw new Error("请在 Novalyte 桌面应用中运行");return invoke<T>(command,args)}
 export const api = {
   bootstrap:()=>call<AppSnapshot>("bootstrap"),
+  diskAccessStatus:()=>call<boolean>("disk_access_status"),
+  openDiskAccessSettings:()=>call<void>("disk_access_open_settings"),
   snapshot:()=>call<AppSnapshot>("app_snapshot"),
   addLibrary:(path:string)=>call<AppSnapshot>("library_add",{path}),
   removeLibrary:(libraryId:string)=>call<AppSnapshot>("library_remove",{libraryId}),
@@ -28,5 +30,6 @@ export const api = {
   remoteStart:()=>call<RemoteStatus>("remote_start"), remoteStop:()=>call<RemoteStatus>("remote_stop"), remoteStatus:()=>call<RemoteStatus>("remote_status"),
   remoteTunnelStart:()=>call<void>("remote_tunnel_start"), remoteTunnelStop:()=>call<void>("remote_tunnel_stop"),
   onPhoneOpen:(handler:(payload:{documentId:string;title:string;deviceName:string})=>void)=>listen<{documentId:string;title:string;deviceName:string}>("remote:phone-open",e=>handler(e.payload)),
+  onReadingProgress:(handler:(payload:{documentId:string;charOffset:number})=>void)=>listen<{documentId:string;charOffset:number}>("reading-progress",e=>handler(e.payload)),
   onLibraryChanged:(handler:()=>void)=>listen("library-changed",handler),
 };

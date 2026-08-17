@@ -10,14 +10,14 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::io::{self, BufRead, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use tauri::{AppHandle, Emitter};
+use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use uuid::Uuid;
 
 const PORT_FIRST: u16 = 43117;
@@ -28,8 +28,10 @@ const BODY_LIMIT: usize = 64 * 1024;
 const PAIR_ATTEMPT_LIMIT: usize = 8;
 const PAIR_ATTEMPT_WINDOW: Duration = Duration::from_secs(60);
 const TUNNEL_TIMEOUT: Duration = Duration::from_secs(25);
+const MAX_CONCURRENT_REQUESTS: usize = 64;
 const CLOUDFLARED_VERSION: &str = "2026.7.2";
-const CLOUDFLARED_SHA256: &str = "0588df58494a6cadd38b9deb6078908a5054063c80784d92fdb8d4a5f3de1c67";
+const CLOUDFLARED_ARM64_SHA256: &str =
+    "0588df58494a6cadd38b9deb6078908a5054063c80784d92fdb8d4a5f3de1c67";
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -57,6 +59,7 @@ pub struct RemoteManager {
     app: AppHandle,
     state: Arc<AppState>,
     inner: Mutex<RemoteInner>,
+    active_requests: AtomicUsize,
 }
 
 struct RemoteInner {
@@ -69,6 +72,7 @@ struct RemoteInner {
     pairing_code: (String, Instant),
     pair_attempts: Vec<(String, Instant)>,
     subscribers: Vec<Sender<String>>,
+    tunnel_generation: u64,
 }
 
 struct ServerHandle {
@@ -105,7 +109,9 @@ impl RemoteManager {
                 pairing_code: (generate_pairing_code(), Instant::now()),
                 pair_attempts: Vec::new(),
                 subscribers: Vec::new(),
+                tunnel_generation: 0,
             }),
+            active_requests: AtomicUsize::new(0),
         }
     }
 
@@ -134,14 +140,28 @@ impl RemoteManager {
                 match server.recv_timeout(Duration::from_millis(300)) {
                     Ok(Some(request)) => {
                         let mgr = mgr.clone();
-                        std::thread::spawn(move || mgr.handle_request(request));
+                        if mgr.active_requests.fetch_add(1, Ordering::AcqRel)
+                            >= MAX_CONCURRENT_REQUESTS
+                        {
+                            mgr.active_requests.fetch_sub(1, Ordering::AcqRel);
+                            respond_text(request, 503, "请求过多，请稍后重试");
+                            continue;
+                        }
+                        std::thread::spawn(move || {
+                            let _permit = RequestPermit(mgr.clone());
+                            mgr.handle_request(request);
+                        });
                     }
                     Ok(None) => continue,
                     Err(_) => break,
                 }
             }
         });
-        inner.server = Some(ServerHandle { port, stop, thread: Some(thread) });
+        inner.server = Some(ServerHandle {
+            port,
+            stop,
+            thread: Some(thread),
+        });
         Ok(self.status_locked(&mut inner))
     }
 
@@ -153,6 +173,7 @@ impl RemoteManager {
             kill_tunnel(tunnel);
         }
         inner.tunnel_starting = false;
+        inner.tunnel_generation = inner.tunnel_generation.wrapping_add(1);
         inner.public_address = None;
         inner.tunnel_error = None;
         if let Some(handle) = inner.server.take() {
@@ -186,7 +207,10 @@ impl RemoteManager {
         } else {
             "off"
         };
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         RemoteStatus {
             running,
             port,
@@ -228,14 +252,25 @@ impl RemoteManager {
         }
         inner.tunnel_starting = true;
         inner.tunnel_error = None;
+        inner.tunnel_generation = inner.tunnel_generation.wrapping_add(1);
+        let generation = inner.tunnel_generation;
         drop(inner);
         let mgr = self.clone();
         std::thread::spawn(move || {
             let result = start_tunnel_process(&mgr, port);
             let mut inner = mgr.inner.lock();
+            if inner.tunnel_generation != generation || inner.server.is_none() {
+                if let Ok((tunnel, _)) = result {
+                    kill_tunnel(tunnel);
+                }
+                return;
+            }
             inner.tunnel_starting = false;
             match result {
-                Ok(tunnel) => inner.tunnel = Some(tunnel),
+                Ok((tunnel, url)) => {
+                    inner.public_address = Some(url);
+                    inner.tunnel = Some(tunnel);
+                }
                 Err(error) => inner.tunnel_error = Some(error.to_string()),
             }
         });
@@ -245,6 +280,7 @@ impl RemoteManager {
     pub fn tunnel_stop(&self) {
         let mut inner = self.inner.lock();
         inner.tunnel_starting = false;
+        inner.tunnel_generation = inner.tunnel_generation.wrapping_add(1);
         inner.public_address = None;
         if let Some(tunnel) = inner.tunnel.take() {
             kill_tunnel(tunnel);
@@ -271,6 +307,10 @@ impl RemoteManager {
             .unwrap_or_default();
         let method = request.method().clone();
 
+        if !self.request_origin_allowed(&request, &host) {
+            return respond_text(request, 421, "请求来源无效");
+        }
+
         if matches!(path.as_str(), "/" | "/remote.html" | "/index.html") && method == Method::Get {
             return self.respond_page(request);
         }
@@ -284,7 +324,11 @@ impl RemoteManager {
         let token = if path == "/api/events" {
             query
                 .as_deref()
-                .and_then(|query| query.split('&').find_map(|part| part.strip_prefix("token=")))
+                .and_then(|query| {
+                    query
+                        .split('&')
+                        .find_map(|part| part.strip_prefix("token="))
+                })
                 .map(|value| value.to_string())
         } else {
             bearer_token(&request)
@@ -300,19 +344,27 @@ impl RemoteManager {
             (Method::Get, "/api/state") => {
                 let result = self.state.db.snapshot();
                 match result {
-                    Ok(snapshot) => respond_json(request, 200, &serde_json::json!({
-                        "libraries": snapshot.libraries,
-                        "documents": snapshot.documents,
-                        "tree": snapshot.tree,
-                        "session": snapshot.session,
-                    })),
+                    Ok(snapshot) => respond_json(
+                        request,
+                        200,
+                        &serde_json::json!({
+                            "libraries": snapshot.libraries,
+                            "documents": snapshot.documents,
+                            "tree": snapshot.tree,
+                            "session": snapshot.session,
+                        }),
+                    ),
                     Err(error) => respond_text(request, 500, &error.to_string()),
                 }
             }
             (Method::Get, document_path) if document_path.starts_with("/api/document/") => {
                 let document_id = &document_path["/api/document/".len()..];
                 match documents::read(&self.state, document_id) {
-                    Ok(content) => respond_json(request, 200, &serde_json::to_value(content).unwrap_or_default()),
+                    Ok(content) => respond_json(
+                        request,
+                        200,
+                        &serde_json::to_value(content).unwrap_or_default(),
+                    ),
                     Err(error) => respond_text(request, 404, &error.to_string()),
                 }
             }
@@ -320,9 +372,13 @@ impl RemoteManager {
                 let result = read_json_body(&mut request).and_then(|body| {
                     let progress: ReadingProgress = serde_json::from_value(body)
                         .map_err(|_| AppError::Message("进度数据格式错误".into()))?;
+                    let document_id = progress.document_id.clone();
+                    let char_offset = progress.char_offset;
                     self.state.db.save_progress(progress)?;
-                    // 桌面侧栏"已阅/继续阅读"即时刷新
-                    let _ = self.app.emit("library-changed", ());
+                    let _ = self.app.emit(
+                        "reading-progress",
+                        serde_json::json!({"documentId":document_id,"charOffset":char_offset}),
+                    );
                     Ok(())
                 });
                 match result {
@@ -407,7 +463,10 @@ impl RemoteManager {
     fn authenticate(&self, token: &str, host: &str) -> Option<String> {
         let token_hash = hash_token(token);
         let mut inner = self.inner.lock();
-        let session = inner.sessions.iter_mut().find(|session| session.token_hash == token_hash)?;
+        let session = inner
+            .sessions
+            .iter_mut()
+            .find(|session| session.token_hash == token_hash)?;
         if session.origin_host != host || session.last_seen.elapsed() > SESSION_LIFETIME {
             return None;
         }
@@ -416,11 +475,19 @@ impl RemoteManager {
     }
 
     fn handle_pair(&self, request: Request, method: Method, ip: String, host: String) {
-        let require_code = self.requires_pairing_code(&host);
+        let require_code = true;
         // 设备 IP 展示：经隧道访问时 remote_addr 恒为 127.0.0.1，改为标记公网
-        let ip = if require_code { "公网".to_string() } else { ip };
+        let ip = if self.is_public_host(&host) {
+            "公网".to_string()
+        } else {
+            ip
+        };
         if method == Method::Get {
-            return respond_json(request, 200, &serde_json::json!({ "requirePairingCode": require_code }));
+            return respond_json(
+                request,
+                200,
+                &serde_json::json!({ "requirePairingCode": require_code }),
+            );
         }
         // 限流只针对实际的配对尝试（POST），不影响手机端刷新页面
         if !self.allow_pair_attempt(&ip) {
@@ -432,7 +499,10 @@ impl RemoteManager {
             Err(error) => return respond_text(request, 400, &error.to_string()),
         };
         if require_code {
-            let code = body.get("code").and_then(|value| value.as_str()).unwrap_or_default();
+            let code = body
+                .get("code")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
             if !self.check_pairing_code(code) {
                 return respond_text(request, 403, "配对码错误");
             }
@@ -454,24 +524,25 @@ impl RemoteManager {
             origin_host: host,
             last_seen: Instant::now(),
         });
-        respond_json(request, 200, &serde_json::json!({
-            "token": token,
-            "deviceId": device_id,
-            "expiresIn": SESSION_LIFETIME.as_secs(),
-        }));
+        respond_json(
+            request,
+            200,
+            &serde_json::json!({
+                "token": token,
+                "deviceId": device_id,
+                "expiresIn": SESSION_LIFETIME.as_secs(),
+            }),
+        );
     }
 
     fn respond_page(&self, request: Request) {
         let mut response = Response::from_string(MOBILE_PAGE.to_string());
-        response.add_header(Header::from_bytes(
-            b"Content-Type",
-            b"text/html; charset=utf-8",
-        ).unwrap());
+        response
+            .add_header(Header::from_bytes(b"Content-Type", b"text/html; charset=utf-8").unwrap());
         // 页面随应用版本更新，禁止浏览器缓存，避免手机端一直拿到旧界面
-        response.add_header(Header::from_bytes(
-            b"Cache-Control",
-            b"no-cache, no-store, must-revalidate",
-        ).unwrap());
+        response.add_header(
+            Header::from_bytes(b"Cache-Control", b"no-cache, no-store, must-revalidate").unwrap(),
+        );
         response.add_header(Header::from_bytes(
             b"Content-Security-Policy",
             b"default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'",
@@ -490,7 +561,11 @@ impl RemoteManager {
         let response = Response::new(
             StatusCode(200),
             headers,
-            SseReader { receiver, buffer: Vec::new(), cursor: 0 },
+            SseReader {
+                receiver,
+                buffer: Vec::new(),
+                cursor: 0,
+            },
             None,
             None,
         );
@@ -499,7 +574,9 @@ impl RemoteManager {
 
     fn broadcast(&self, payload: String) {
         let mut inner = self.inner.lock();
-        inner.subscribers.retain(|sender| sender.send(payload.clone()).is_ok());
+        inner
+            .subscribers
+            .retain(|sender| sender.send(payload.clone()).is_ok());
     }
 
     fn current_pairing_code(&self, inner: &mut RemoteInner) -> String {
@@ -515,8 +592,58 @@ impl RemoteManager {
         timing_safe_eq(&self.current_pairing_code(&mut inner), input.trim())
     }
 
-    fn requires_pairing_code(&self, host: &str) -> bool {
-        host.contains("trycloudflare.com")
+    fn request_origin_allowed(&self, request: &Request, host: &str) -> bool {
+        if !self.host_allowed(host) {
+            return false;
+        }
+        request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("Origin"))
+            .is_none_or(|header| {
+                let origin = header.value.as_str().trim_end_matches('/');
+                origin
+                    .rsplit_once("://")
+                    .is_some_and(|(_, origin_host)| origin_host.eq_ignore_ascii_case(host))
+            })
+    }
+
+    fn host_allowed(&self, host: &str) -> bool {
+        let host = host.to_ascii_lowercase();
+        let inner = self.inner.lock();
+        let port = inner
+            .server
+            .as_ref()
+            .map(|server| server.port)
+            .unwrap_or(PORT_FIRST);
+        if matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]")
+            || host == format!("localhost:{port}")
+            || host == format!("127.0.0.1:{port}")
+            || host == format!("[::1]:{port}")
+        {
+            return true;
+        }
+        if lan_urls(port)
+            .iter()
+            .filter_map(|url| url.strip_prefix("http://"))
+            .any(|allowed| allowed.eq_ignore_ascii_case(&host))
+        {
+            return true;
+        }
+        inner
+            .public_address
+            .as_deref()
+            .and_then(|url| url.strip_prefix("https://"))
+            .is_some_and(|allowed| allowed.eq_ignore_ascii_case(&host))
+    }
+
+    fn is_public_host(&self, host: &str) -> bool {
+        self.inner
+            .lock()
+            .public_address
+            .as_deref()
+            .and_then(|url| url.strip_prefix("https://"))
+            .is_some_and(|allowed| allowed.eq_ignore_ascii_case(host))
     }
 
     fn allow_pair_attempt(&self, ip: &str) -> bool {
@@ -525,12 +652,23 @@ impl RemoteManager {
         inner
             .pair_attempts
             .retain(|(_, time)| now.duration_since(*time) < PAIR_ATTEMPT_WINDOW);
-        let count = inner.pair_attempts.iter().filter(|(addr, _)| addr == ip).count();
+        let count = inner
+            .pair_attempts
+            .iter()
+            .filter(|(addr, _)| addr == ip)
+            .count();
         if count >= PAIR_ATTEMPT_LIMIT {
             return false;
         }
         inner.pair_attempts.push((ip.to_string(), now));
         true
+    }
+}
+
+struct RequestPermit(Arc<RemoteManager>);
+impl Drop for RequestPermit {
+    fn drop(&mut self) {
+        self.0.active_requests.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -551,7 +689,10 @@ fn generate_pairing_code() -> String {
         digits
     } else {
         // 概率极低：uuid 中数字不足 6 位时用时间兜底
-        let millis = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().subsec_millis();
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_millis();
         format!("{:06}", millis)
     }
 }
@@ -588,8 +729,11 @@ fn read_json_body(request: &mut Request) -> Result<serde_json::Value, AppError> 
 }
 
 fn respond_json(request: Request, status: u16, value: &serde_json::Value) {
-    let mut response = Response::from_string(value.to_string()).with_status_code(StatusCode(status));
-    response.add_header(Header::from_bytes(b"Content-Type", b"application/json; charset=utf-8").unwrap());
+    let mut response =
+        Response::from_string(value.to_string()).with_status_code(StatusCode(status));
+    response.add_header(
+        Header::from_bytes(b"Content-Type", b"application/json; charset=utf-8").unwrap(),
+    );
     let _ = request.respond(response);
 }
 
@@ -613,7 +757,13 @@ fn lan_urls(port: u16) -> Vec<String> {
             }
         }
     }
-    urls.sort_by_key(|url| if url.starts_with("http://192.168.") { 0 } else { 1 });
+    urls.sort_by_key(|url| {
+        if url.starts_with("http://192.168.") {
+            0
+        } else {
+            1
+        }
+    });
     urls
 }
 
@@ -648,22 +798,37 @@ impl Read for SseReader {
 
 // ---------- cloudflared 隧道 ----------
 
-fn start_tunnel_process(mgr: &Arc<RemoteManager>, port: u16) -> Result<TunnelHandle, AppError> {
+fn start_tunnel_process(
+    mgr: &Arc<RemoteManager>,
+    port: u16,
+) -> Result<(TunnelHandle, String), AppError> {
     let binary = ensure_cloudflared(&mgr.state.data_dir)?;
     let mut child = Command::new(&binary)
-        .args(["tunnel", "--url", &format!("http://127.0.0.1:{port}"), "--no-autoupdate"])
+        .args([
+            "tunnel",
+            "--url",
+            &format!("http://127.0.0.1:{port}"),
+            "--no-autoupdate",
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::piped()) // cloudflared 日志（含公网 URL）输出到 stderr
         .spawn()
         .map_err(|error| AppError::Message(format!("启动 cloudflared 失败：{error}")))?;
-    let stderr = child.stderr.take().ok_or_else(|| AppError::Message("无法读取 cloudflared 输出".into()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| AppError::Message("无法读取 cloudflared 输出".into()))?;
     let (sender, receiver) = mpsc::channel::<String>();
     std::thread::spawn(move || {
         let mut reader = io::BufReader::new(stderr);
         let mut line = String::new();
         while reader.read_line(&mut line).is_ok() && !line.is_empty() {
             if let Some(start) = line.find("https://") {
-                let url = line[start..].split_whitespace().next().unwrap_or_default().to_string();
+                let url = line[start..]
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
                 if url.contains("trycloudflare.com") {
                     let _ = sender.send(url);
                 }
@@ -681,8 +846,7 @@ fn start_tunnel_process(mgr: &Arc<RemoteManager>, port: u16) -> Result<TunnelHan
             ));
         }
     };
-    mgr.inner.lock().public_address = Some(url);
-    Ok(TunnelHandle { child })
+    Ok((TunnelHandle { child }, url))
 }
 
 fn kill_tunnel(mut tunnel: TunnelHandle) {
@@ -691,7 +855,7 @@ fn kill_tunnel(mut tunnel: TunnelHandle) {
 }
 
 /// 优先使用系统 PATH 中的 cloudflared；否则下载固定版本并校验 sha256 到 data_dir/bin。
-fn ensure_cloudflared(data_dir: &PathBuf) -> Result<PathBuf, AppError> {
+fn ensure_cloudflared(data_dir: &Path) -> Result<PathBuf, AppError> {
     if let Ok(output) = Command::new("which").arg("cloudflared").output() {
         if output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -701,19 +865,23 @@ fn ensure_cloudflared(data_dir: &PathBuf) -> Result<PathBuf, AppError> {
         }
     }
     if !cfg!(target_os = "macos") {
-        return Err(AppError::Message("当前系统暂不支持公网隧道（仅 macOS）".into()));
+        return Err(AppError::Message(
+            "当前系统暂不支持公网隧道（仅 macOS）".into(),
+        ));
     }
-    let arch = if cfg!(target_arch = "aarch64") {
-        "arm64"
+    let (arch, expected_sha256) = if cfg!(target_arch = "aarch64") {
+        ("arm64", CLOUDFLARED_ARM64_SHA256)
     } else if cfg!(target_arch = "x86_64") {
-        "amd64"
+        return Err(AppError::Message(
+            "Intel Mac 请先通过 Homebrew 安装 cloudflared，再开启公网隧道".into(),
+        ));
     } else {
         return Err(AppError::Message("当前架构暂不支持公网隧道".into()));
     };
     let bin_dir = data_dir.join("bin");
     let target = bin_dir.join("cloudflared");
     if target.exists() {
-        if verify_sha256(&target) {
+        if verify_sha256(&target, expected_sha256) {
             return Ok(target);
         }
         let _ = std::fs::remove_file(&target);
@@ -725,7 +893,15 @@ fn ensure_cloudflared(data_dir: &PathBuf) -> Result<PathBuf, AppError> {
     );
     let archive = bin_dir.join("cloudflared.tgz");
     let status = Command::new("curl")
-        .args(["-L", "--fail", "--connect-timeout", "15", "--max-time", "300", "-o"])
+        .args([
+            "-L",
+            "--fail",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            "300",
+            "-o",
+        ])
         .arg(&archive)
         .arg(&url)
         .status()
@@ -747,7 +923,7 @@ fn ensure_cloudflared(data_dir: &PathBuf) -> Result<PathBuf, AppError> {
     if !status.success() || !target.exists() {
         return Err(AppError::Message("cloudflared 解压失败".into()));
     }
-    if !verify_sha256(&target) {
+    if !verify_sha256(&target, expected_sha256) {
         let _ = std::fs::remove_file(&target);
         return Err(AppError::Message(
             "cloudflared 校验失败，已删除文件，请重试".into(),
@@ -757,9 +933,9 @@ fn ensure_cloudflared(data_dir: &PathBuf) -> Result<PathBuf, AppError> {
     Ok(target)
 }
 
-fn verify_sha256(path: &PathBuf) -> bool {
+fn verify_sha256(path: &Path, expected: &str) -> bool {
     std::fs::read(path)
-        .map(|bytes| format!("{:x}", Sha256::digest(&bytes)) == CLOUDFLARED_SHA256)
+        .map(|bytes| format!("{:x}", Sha256::digest(&bytes)) == expected)
         .unwrap_or(false)
 }
 

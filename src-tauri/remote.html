@@ -248,7 +248,7 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
   }
 
   // ---------- 配对 ----------
-  function showPair(message) {
+  function showPair(message, automaticCode) {
     show("pair-view");
     $("pair-error").textContent = "";
     $("pair-code-input").classList.add("hidden");
@@ -256,6 +256,11 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
     $("pair-hint").textContent = message || "正在连接电脑上的书库…";
     fetch("/api/pair").then(function (res) { return res.json(); }).then(function (info) {
       if (info.requirePairingCode) {
+        if (automaticCode) {
+          $("pair-hint").textContent = "正在通过二维码安全配对…";
+          doPair(automaticCode);
+          return;
+        }
         $("pair-hint").textContent = "请在电脑上查看 6 位配对码";
         $("pair-code-input").classList.remove("hidden");
         $("code-input").focus();
@@ -371,13 +376,19 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
       if (!docs.length) { list.innerHTML = '<div class="empty">这个书库还没有文稿</div>'; return; }
       var render = function () { renderCards(docs); };
       if (state.previewCache[libraryId]) { render(); return; }
-      return api("/api/previews", {
-        method: "POST",
-        body: JSON.stringify({ ids: docs.map(function (d) { return d.id; }) })
-      }).then(function (data) {
-        if (!data) return;
+      var ids = docs.map(function (d) { return d.id; });
+      var requests = [];
+      for (var offset = 0; offset < ids.length; offset += 200) {
+        requests.push(api("/api/previews", {
+          method: "POST",
+          body: JSON.stringify({ ids: ids.slice(offset, offset + 200) })
+        }));
+      }
+      return Promise.all(requests).then(function (groups) {
         state.previewCache[libraryId] = {};
-        (data.cards || []).forEach(function (card) { state.previewCache[libraryId][card.documentId] = card.paragraphs || []; });
+        groups.forEach(function (data) {
+          (data && data.cards || []).forEach(function (card) { state.previewCache[libraryId][card.documentId] = card.paragraphs || []; });
+        });
         render();
       });
     }).catch(function () {
@@ -480,21 +491,24 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
   function applyFontSize() {
     $("reader-text").style.fontSize = state.fontSize + "px";
   }
+  function writeProgress() {
+    if (!state.doc || !state.docId) return;
+    var scroll = $("reader-scroll");
+    var ratio = scroll.scrollTop / Math.max(1, scroll.scrollHeight - scroll.clientHeight);
+    var charOffset = Math.round((state.doc.content || "").length * ratio);
+    api("/api/progress", {
+      method: "POST",
+      body: JSON.stringify({ documentId: state.docId, charOffset: charOffset, scrollRatio: ratio })
+    });
+  }
   function saveProgress() {
     clearTimeout(state.saveTimer);
-    state.saveTimer = setTimeout(function () {
-      var scroll = $("reader-scroll");
-      var ratio = scroll.scrollTop / Math.max(1, scroll.scrollHeight - scroll.clientHeight);
-      var charOffset = Math.round((state.doc.content || "").length * ratio);
-      api("/api/progress", {
-        method: "POST",
-        body: JSON.stringify({ documentId: state.docId, charOffset: charOffset, scrollRatio: ratio })
-      });
-    }, 600);
+    state.saveTimer = setTimeout(writeProgress, 600);
   }
   $("reader-scroll").addEventListener("scroll", saveProgress);
   $("reader-back").addEventListener("click", function () {
     clearTimeout(state.saveTimer);
+    writeProgress();
     state.doc = null;
     state.docId = null;
     if (state.libraryId) openLibrary(state.libraryId, state.libraryName);
@@ -593,16 +607,18 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
   // ---------- 启动 ----------
   applyTheme();
   var stored = localStorage.getItem(TOKEN_KEY);
-  if (location.hash === "#pair") {
-    location.hash = "";
+  var automaticCode = location.hash.indexOf("#pair=") === 0 ? decodeURIComponent(location.hash.slice(6)) : null;
+  var pairingRequested = Boolean(automaticCode || location.hash === "#pair");
+  if (pairingRequested) {
+    history.replaceState(null, "", location.pathname + location.search);
     localStorage.removeItem(TOKEN_KEY);
     stored = null;
-    showPair("请确认配对");
+    showPair("请确认配对", automaticCode);
   }
   if (stored) {
     state.token = stored;
     enterApp();
-  } else {
+  } else if (!pairingRequested) {
     showPair();
   }
 })();

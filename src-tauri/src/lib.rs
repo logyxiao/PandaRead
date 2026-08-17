@@ -1,7 +1,7 @@
 mod chapters;
 mod database;
-mod docx;
 mod documents;
+mod docx;
 mod epub;
 mod library;
 mod macos_access;
@@ -13,7 +13,13 @@ use library::LibraryWatcher;
 use models::*;
 use parking_lot::Mutex;
 use remote::{RemoteManager, RemoteStatus};
-use std::{path::PathBuf, sync::{Arc, atomic::{AtomicBool, Ordering}}};
+use std::{
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 use tauri::{Emitter, Manager, State};
 
 pub struct AppState {
@@ -27,25 +33,41 @@ pub struct AppState {
 
 impl AppState {
     pub fn cached_read(&self, id: &str, mtime: i64) -> Option<DocumentContent> {
-        self.content_cache.lock().iter().find(|(cached_id, cached_mtime, _)| cached_id == id && *cached_mtime == mtime).map(|(_, _, content)| content.clone())
+        self.content_cache
+            .lock()
+            .iter()
+            .find(|(cached_id, cached_mtime, _)| cached_id == id && *cached_mtime == mtime)
+            .map(|(_, _, content)| content.clone())
     }
     pub fn remember_read(&self, id: String, mtime: i64, content: DocumentContent) {
         let mut cache = self.content_cache.lock();
         cache.retain(|(cached_id, _, _)| cached_id != &id);
         cache.push((id, mtime, content));
-        if cache.len() > 4 { cache.remove(0); }
+        if cache.len() > 4 {
+            cache.remove(0);
+        }
     }
     pub fn forget_read(&self, id: &str) {
-        self.content_cache.lock().retain(|(cached_id, _, _)| cached_id != id);
+        self.content_cache
+            .lock()
+            .retain(|(cached_id, _, _)| cached_id != id);
     }
 }
 
 type SharedState = Arc<AppState>;
 
 #[tauri::command]
-fn bootstrap(app: tauri::AppHandle, state: State<'_, SharedState>) -> Result<AppSnapshot, AppError> {
+fn bootstrap(
+    app: tauri::AppHandle,
+    state: State<'_, SharedState>,
+) -> Result<AppSnapshot, AppError> {
+    if !macos_access::has_full_disk_access() {
+        return Err(AppError::DiskAccessRequired);
+    }
     let snapshot = state.db.snapshot()?;
     if !state.initial_scan_started.swap(true, Ordering::SeqCst) {
+        library::restore_access(&state);
+        library::start_watchers(&app, &state)?;
         let state = state.inner().clone();
         tauri::async_runtime::spawn_blocking(move || {
             if library::refresh_all(&state).is_ok() {
@@ -57,29 +79,53 @@ fn bootstrap(app: tauri::AppHandle, state: State<'_, SharedState>) -> Result<App
 }
 
 #[tauri::command]
-async fn app_snapshot(state: State<'_, SharedState>) -> Result<AppSnapshot, AppError> {
-    let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || state.db.snapshot()).await.map_err(|error| AppError::Message(error.to_string()))?
+fn disk_access_status() -> bool {
+    macos_access::has_full_disk_access()
 }
 
 #[tauri::command]
-async fn library_add(app: tauri::AppHandle, state: State<'_, SharedState>, path: String) -> Result<AppSnapshot, AppError> {
+fn disk_access_open_settings() -> Result<(), AppError> {
+    macos_access::open_full_disk_access_settings().map_err(AppError::from)
+}
+
+#[tauri::command]
+async fn app_snapshot(state: State<'_, SharedState>) -> Result<AppSnapshot, AppError> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || state.db.snapshot())
+        .await
+        .map_err(|error| AppError::Message(error.to_string()))?
+}
+
+#[tauri::command]
+async fn library_add(
+    app: tauri::AppHandle,
+    state: State<'_, SharedState>,
+    path: String,
+) -> Result<AppSnapshot, AppError> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         library::add(&state, &path)?;
         library::start_watchers(&app, &state)?;
         state.db.snapshot()
-    }).await.map_err(|error| AppError::Message(error.to_string()))?
+    })
+    .await
+    .map_err(|error| AppError::Message(error.to_string()))?
 }
 
 #[tauri::command]
-async fn library_remove(app: tauri::AppHandle, state: State<'_, SharedState>, library_id: String) -> Result<AppSnapshot, AppError> {
+async fn library_remove(
+    app: tauri::AppHandle,
+    state: State<'_, SharedState>,
+    library_id: String,
+) -> Result<AppSnapshot, AppError> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         state.db.remove_library(&library_id)?;
         library::start_watchers(&app, &state)?;
         state.db.snapshot()
-    }).await.map_err(|error| AppError::Message(error.to_string()))?
+    })
+    .await
+    .map_err(|error| AppError::Message(error.to_string()))?
 }
 
 #[tauri::command]
@@ -88,68 +134,114 @@ async fn library_refresh(state: State<'_, SharedState>) -> Result<AppSnapshot, A
     tauri::async_runtime::spawn_blocking(move || {
         library::refresh_all(&state)?;
         state.db.snapshot()
-    }).await.map_err(|error| AppError::Message(error.to_string()))?
+    })
+    .await
+    .map_err(|error| AppError::Message(error.to_string()))?
 }
 
 #[tauri::command]
-async fn document_read(state: State<'_, SharedState>, remote: State<'_, Arc<RemoteManager>>, document_id: String) -> Result<DocumentContent, AppError> {
+async fn document_read(
+    state: State<'_, SharedState>,
+    remote: State<'_, Arc<RemoteManager>>,
+    document_id: String,
+) -> Result<DocumentContent, AppError> {
     let state = state.inner().clone();
     let id = document_id.clone();
-    let content = tauri::async_runtime::spawn_blocking(move || documents::read(&state, &id)).await.map_err(|error| AppError::Message(error.to_string()))??;
+    let content = tauri::async_runtime::spawn_blocking(move || documents::read(&state, &id))
+        .await
+        .map_err(|error| AppError::Message(error.to_string()))??;
     // 双向跟随：桌面切换文稿时推送给所有已连接的手机
     remote.broadcast_desktop_open(&document_id, &content.summary.title);
     Ok(content)
 }
 
 #[tauri::command]
-async fn document_write(state: State<'_, SharedState>, input: WriteDocumentInput) -> Result<DocumentContent, AppError> {
+async fn document_write(
+    state: State<'_, SharedState>,
+    input: WriteDocumentInput,
+) -> Result<DocumentContent, AppError> {
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || documents::write(&state, input)).await.map_err(|error| AppError::Message(error.to_string()))?
+    tauri::async_runtime::spawn_blocking(move || documents::write(&state, input))
+        .await
+        .map_err(|error| AppError::Message(error.to_string()))?
 }
 
 #[tauri::command]
-async fn document_force_write(state: State<'_, SharedState>, input: WriteDocumentInput) -> Result<DocumentContent, AppError> {
+async fn document_force_write(
+    state: State<'_, SharedState>,
+    input: WriteDocumentInput,
+) -> Result<DocumentContent, AppError> {
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || documents::force_write(&state, input)).await.map_err(|error| AppError::Message(error.to_string()))?
+    tauri::async_runtime::spawn_blocking(move || documents::force_write(&state, input))
+        .await
+        .map_err(|error| AppError::Message(error.to_string()))?
 }
 
 #[tauri::command]
-fn document_save_as(state: State<'_, SharedState>, document_id: String, content: String, target_path: String) -> Result<(), AppError> {
+fn document_save_as(
+    state: State<'_, SharedState>,
+    document_id: String,
+    content: String,
+    target_path: String,
+) -> Result<(), AppError> {
     documents::save_as(&state, &document_id, &content, &target_path)
 }
 
 #[tauri::command]
-async fn document_tag_update(state: State<'_, SharedState>, document_id: String, tags: Vec<String>) -> Result<DocumentSummary, AppError> {
+async fn document_tag_update(
+    state: State<'_, SharedState>,
+    document_id: String,
+    tags: Vec<String>,
+) -> Result<DocumentSummary, AppError> {
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || state.db.update_tags(&document_id, &tags)).await.map_err(|e| AppError::Message(e.to_string()))?
+    tauri::async_runtime::spawn_blocking(move || state.db.update_tags(&document_id, &tags))
+        .await
+        .map_err(|e| AppError::Message(e.to_string()))?
 }
 
 #[tauri::command]
-async fn document_tidy(state: State<'_, SharedState>, document_id: String) -> Result<DocumentContent, AppError> {
+async fn document_tidy(
+    state: State<'_, SharedState>,
+    document_id: String,
+) -> Result<DocumentContent, AppError> {
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || documents::tidy(&state, &document_id)).await.map_err(|e| AppError::Message(e.to_string()))?
+    tauri::async_runtime::spawn_blocking(move || documents::tidy(&state, &document_id))
+        .await
+        .map_err(|e| AppError::Message(e.to_string()))?
 }
 
 #[tauri::command]
-fn document_create(state: State<'_, SharedState>, input: FileCreateInput) -> Result<AppSnapshot, AppError> {
+fn document_create(
+    state: State<'_, SharedState>,
+    input: FileCreateInput,
+) -> Result<AppSnapshot, AppError> {
     library::create_entry(&state, input)?;
     state.db.snapshot()
 }
 
 #[tauri::command]
-fn document_rename(state: State<'_, SharedState>, input: FileRenameInput) -> Result<AppSnapshot, AppError> {
+fn document_rename(
+    state: State<'_, SharedState>,
+    input: FileRenameInput,
+) -> Result<AppSnapshot, AppError> {
     library::rename_entry(&state, input)?;
     state.db.snapshot()
 }
 
 #[tauri::command]
-fn document_move(state: State<'_, SharedState>, input: FileMoveInput) -> Result<AppSnapshot, AppError> {
+fn document_move(
+    state: State<'_, SharedState>,
+    input: FileMoveInput,
+) -> Result<AppSnapshot, AppError> {
     library::move_entry(&state, input)?;
     state.db.snapshot()
 }
 
 #[tauri::command]
-fn document_trash(state: State<'_, SharedState>, input: FileTargetInput) -> Result<AppSnapshot, AppError> {
+fn document_trash(
+    state: State<'_, SharedState>,
+    input: FileTargetInput,
+) -> Result<AppSnapshot, AppError> {
     library::trash_entry(&state, input)?;
     state.db.snapshot()
 }
@@ -160,19 +252,29 @@ fn document_reveal(state: State<'_, SharedState>, input: FileTargetInput) -> Res
 }
 
 #[tauri::command]
-fn document_update_meta(state: State<'_, SharedState>, input: DocumentMetaInput) -> Result<AppSnapshot, AppError> {
+fn document_update_meta(
+    state: State<'_, SharedState>,
+    input: DocumentMetaInput,
+) -> Result<AppSnapshot, AppError> {
     state.db.update_document_meta(input)?;
     state.db.snapshot()
 }
 
 #[tauri::command]
-fn document_shelf(state: State<'_, SharedState>, document_id: String, shelf: String) -> Result<DocumentSummary, AppError> {
+fn document_shelf(
+    state: State<'_, SharedState>,
+    document_id: String,
+    shelf: String,
+) -> Result<DocumentSummary, AppError> {
     state.db.update_shelf(&document_id, &shelf)
 }
 
 /// 批量返回文档前几段预览（卡片视图用），单篇失败跳过不影响其余。
 #[tauri::command]
-async fn document_previews(state: State<'_, SharedState>, ids: Vec<String>) -> Result<Vec<serde_json::Value>, AppError> {
+async fn document_previews(
+    state: State<'_, SharedState>,
+    ids: Vec<String>,
+) -> Result<Vec<serde_json::Value>, AppError> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let mut out = Vec::new();
@@ -182,36 +284,58 @@ async fn document_previews(state: State<'_, SharedState>, ids: Vec<String>) -> R
             }
         }
         Ok(out)
-    }).await.map_err(|error| AppError::Message(error.to_string()))?
+    })
+    .await
+    .map_err(|error| AppError::Message(error.to_string()))?
 }
 
 #[tauri::command]
-fn chapter_create(state: State<'_, SharedState>, input: ChapterInput) -> Result<Vec<ChapterNode>, AppError> {
+fn chapter_create(
+    state: State<'_, SharedState>,
+    input: ChapterInput,
+) -> Result<Vec<ChapterNode>, AppError> {
     state.db.create_chapter(input)
 }
 
 #[tauri::command]
-fn chapter_update(state: State<'_, SharedState>, input: ChapterUpdateInput) -> Result<Vec<ChapterNode>, AppError> {
+fn chapter_update(
+    state: State<'_, SharedState>,
+    input: ChapterUpdateInput,
+) -> Result<Vec<ChapterNode>, AppError> {
     state.db.update_chapter(input)
 }
 
 #[tauri::command]
-fn chapter_delete(state: State<'_, SharedState>, chapter_id: String, document_id: String) -> Result<Vec<ChapterNode>, AppError> {
+fn chapter_delete(
+    state: State<'_, SharedState>,
+    chapter_id: String,
+    document_id: String,
+) -> Result<Vec<ChapterNode>, AppError> {
     state.db.delete_chapter(&chapter_id, &document_id)
 }
 
 #[tauri::command]
-fn annotation_save(state: State<'_, SharedState>, input: AnnotationInput) -> Result<Vec<Annotation>, AppError> {
+fn annotation_save(
+    state: State<'_, SharedState>,
+    input: AnnotationInput,
+) -> Result<Vec<Annotation>, AppError> {
     state.db.save_annotation(input)
 }
 
 #[tauri::command]
-fn annotation_delete(state: State<'_, SharedState>, annotation_id: String, document_id: String) -> Result<Vec<Annotation>, AppError> {
+fn annotation_delete(
+    state: State<'_, SharedState>,
+    annotation_id: String,
+    document_id: String,
+) -> Result<Vec<Annotation>, AppError> {
     state.db.delete_annotation(&annotation_id, &document_id)
 }
 
 #[tauri::command]
-fn material_save(state: State<'_, SharedState>, input: MaterialInput) -> Result<Vec<MaterialClip>, AppError> {
+fn material_save(
+    state: State<'_, SharedState>,
+    input: MaterialInput,
+) -> Result<Vec<MaterialClip>, AppError> {
     state.db.save_material(input)
 }
 
@@ -222,18 +346,28 @@ fn group_create(state: State<'_, SharedState>, name: String) -> Result<AppSnapsh
 }
 
 #[tauri::command]
-fn group_toggle_document(state: State<'_, SharedState>, group_id: String, document_id: String) -> Result<AppSnapshot, AppError> {
+fn group_toggle_document(
+    state: State<'_, SharedState>,
+    group_id: String,
+    document_id: String,
+) -> Result<AppSnapshot, AppError> {
     state.db.toggle_group_document(&group_id, &document_id)?;
     state.db.snapshot()
 }
 
 #[tauri::command]
-fn search(state: State<'_, SharedState>, query: SearchQuery) -> Result<Vec<SearchResult>, AppError> {
+fn search(
+    state: State<'_, SharedState>,
+    query: SearchQuery,
+) -> Result<Vec<SearchResult>, AppError> {
     state.db.search(query)
 }
 
 #[tauri::command]
-fn reading_progress_save(state: State<'_, SharedState>, input: ReadingProgress) -> Result<(), AppError> {
+fn reading_progress_save(
+    state: State<'_, SharedState>,
+    input: ReadingProgress,
+) -> Result<(), AppError> {
     state.db.save_progress(input)
 }
 
@@ -248,19 +382,29 @@ fn session_save(state: State<'_, SharedState>, session: AppSession) -> Result<()
 }
 
 #[tauri::command]
-fn history_list(state: State<'_, SharedState>, document_id: String) -> Result<Vec<HistoryEntry>, AppError> {
+fn history_list(
+    state: State<'_, SharedState>,
+    document_id: String,
+) -> Result<Vec<HistoryEntry>, AppError> {
     state.db.history(&document_id)
 }
 
 #[tauri::command]
-fn history_restore(state: State<'_, SharedState>, history_id: String, document_id: String) -> Result<DocumentContent, AppError> {
+fn history_restore(
+    state: State<'_, SharedState>,
+    history_id: String,
+    document_id: String,
+) -> Result<DocumentContent, AppError> {
     documents::restore_history(&state, &history_id, &document_id)
 }
 
 /// 导出文稿为 Word（宋体小四、1.5 倍行距、###N. 章节转第N章），
 /// 输出到源文件所在目录，文件名与文档顶部标题取小说标题（正文.md 用父文件夹名）。
 #[tauri::command]
-async fn document_export_docx(state: State<'_, SharedState>, document_id: String) -> Result<String, AppError> {
+async fn document_export_docx(
+    state: State<'_, SharedState>,
+    document_id: String,
+) -> Result<String, AppError> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || docx::export(&state, &document_id))
         .await
@@ -310,21 +454,54 @@ pub fn run() {
                 initial_scan_started: AtomicBool::new(false),
             });
             app.manage(state.clone());
-            app.manage(Arc::new(RemoteManager::new(app.handle().clone(), state.clone())));
-            library::restore_access(&state);
-            library::start_watchers(&app.handle().clone(), &state).ok();
+            app.manage(Arc::new(RemoteManager::new(
+                app.handle().clone(),
+                state.clone(),
+            )));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            bootstrap, app_snapshot, library_add, library_remove, library_refresh,
-            document_read, document_write, document_force_write, document_save_as, document_tidy, document_create,
-            document_rename, document_move, document_trash, document_reveal, document_update_meta, document_shelf, document_previews,
-            chapter_create, chapter_update, chapter_delete,
-            annotation_save, annotation_delete, material_save,
+            bootstrap,
+            disk_access_status,
+            disk_access_open_settings,
+            app_snapshot,
+            library_add,
+            library_remove,
+            library_refresh,
+            document_read,
+            document_write,
+            document_force_write,
+            document_save_as,
+            document_tidy,
+            document_create,
+            document_rename,
+            document_move,
+            document_trash,
+            document_reveal,
+            document_update_meta,
+            document_shelf,
+            document_previews,
+            chapter_create,
+            chapter_update,
+            chapter_delete,
+            annotation_save,
+            annotation_delete,
+            material_save,
             document_tag_update,
-            group_create, group_toggle_document, search, reading_progress_save,
-            settings_save, session_save, history_list, history_restore, document_export_docx,
-            remote_start, remote_stop, remote_status, remote_tunnel_start, remote_tunnel_stop
+            group_create,
+            group_toggle_document,
+            search,
+            reading_progress_save,
+            settings_save,
+            session_save,
+            history_list,
+            history_restore,
+            document_export_docx,
+            remote_start,
+            remote_stop,
+            remote_status,
+            remote_tunnel_start,
+            remote_tunnel_stop
         ])
         .build(tauri::generate_context!())
         .expect("failed to build 熊猫阅读");
