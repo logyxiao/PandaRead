@@ -82,13 +82,6 @@ pub fn restore_access(state: &Arc<AppState>) {
                 continue;
             }
         }
-        if let Some(fresh) = macos_access::bookmark_for_path(&root) {
-            if let Some((_, access, _)) = macos_access::start_access(&fresh) {
-                let _ = state.db.set_library_bookmark(&id, &fresh);
-                held.push(access);
-                continue;
-            }
-        }
         if let Some(access) = macos_access::start_path(&root) {
             held.push(access);
         }

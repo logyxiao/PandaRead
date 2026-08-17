@@ -61,9 +61,6 @@ fn bootstrap(
     app: tauri::AppHandle,
     state: State<'_, SharedState>,
 ) -> Result<AppSnapshot, AppError> {
-    if !macos_access::has_full_disk_access() {
-        return Err(AppError::DiskAccessRequired);
-    }
     let snapshot = state.db.snapshot()?;
     if !state.initial_scan_started.swap(true, Ordering::SeqCst) {
         library::restore_access(&state);
@@ -76,16 +73,6 @@ fn bootstrap(
         });
     }
     Ok(snapshot)
-}
-
-#[tauri::command]
-fn disk_access_status() -> bool {
-    macos_access::has_full_disk_access()
-}
-
-#[tauri::command]
-fn disk_access_open_settings() -> Result<(), AppError> {
-    macos_access::open_full_disk_access_settings().map_err(AppError::from)
 }
 
 #[tauri::command]
@@ -462,8 +449,6 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             bootstrap,
-            disk_access_status,
-            disk_access_open_settings,
             app_snapshot,
             library_add,
             library_remove,

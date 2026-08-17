@@ -11,8 +11,6 @@ pub enum AppError {
     AlreadyExists,
     #[error("文稿已被其他程序修改")]
     WriteConflict,
-    #[error("请先在系统设置中为熊猫阅读开启完全磁盘访问权限")]
-    DiskAccessRequired,
     #[error("{0}")]
     Message(String),
 }
@@ -27,7 +25,6 @@ impl Serialize for AppError {
             Self::PathOutsideLibrary => ("PATH_OUTSIDE_LIBRARY", self.to_string()),
             Self::AlreadyExists => ("ALREADY_EXISTS", self.to_string()),
             Self::WriteConflict => ("WRITE_CONFLICT", self.to_string()),
-            Self::DiskAccessRequired => ("DISK_ACCESS_REQUIRED", self.to_string()),
             Self::Message(_) => ("APP_ERROR", self.to_string()),
         };
         ErrorPayload {
